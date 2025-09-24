@@ -6,11 +6,11 @@ A high-performance, memory-efficient command-line tool for file/folder
 operations using Zstandard, with optional AES-256-GCM encryption.
 """
 
+import io
 import os
 import sys
 import tarfile
-import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import IO, Any, Callable, Generator, List
 
@@ -34,7 +34,7 @@ from rich.table import Table
 try:
     from cryptography.exceptions import InvalidTag
     from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
     CRYPTO_AVAILABLE = True
@@ -46,9 +46,9 @@ TITLE = "Zstandard 智能工具箱 (Nexus 重构版)"
 SALT_SIZE = 16
 NONCE_SIZE = 12
 KEY_SIZE = 32
+TAG_SIZE = 16
 PBKDF2_ITERATIONS = 480_000
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks for streaming
-
 
 # --- Cryptography Helpers ---
 def derive_key(password: str, salt: bytes) -> bytes:
@@ -62,28 +62,161 @@ def derive_key(password: str, salt: bytes) -> bytes:
     return kdf.derive(password.encode("utf-8"))
 
 
-def encrypt_data(data: bytes, password: str) -> bytes:
-    """Encrypt data using AES-256-GCM."""
-    if not CRYPTO_AVAILABLE:
-        raise RuntimeError("Cryptography library not installed.")
-    salt = os.urandom(SALT_SIZE)
-    key = derive_key(password, salt)
-    aesgcm = AESGCM(key)
-    nonce = os.urandom(NONCE_SIZE)
-    ciphertext = aesgcm.encrypt(nonce, data, None)
-    return salt + nonce + ciphertext
+class AESGCMEncryptWriter:
+    """File-like wrapper that streams AES-256-GCM encryption to an output handle."""
+
+    def __init__(self, password: str, out_fh: IO[bytes]):
+        if not CRYPTO_AVAILABLE:
+            raise RuntimeError("Cryptography library not installed.")
+        self._password = password
+        self._out_fh = out_fh
+        self._encryptor = None
+        self._finalized = False
+
+    def __enter__(self) -> "AESGCMEncryptWriter":
+        salt = os.urandom(SALT_SIZE)
+        key = derive_key(self._password, salt)
+        nonce = os.urandom(NONCE_SIZE)
+        cipher = Cipher(algorithms.AES(key), modes.GCM(nonce))
+        self._encryptor = cipher.encryptor()
+        self._out_fh.write(salt)
+        self._out_fh.write(nonce)
+        return self
+
+    def write(self, data: bytes) -> int:
+        if not data:
+            return 0
+        if self._encryptor is None:
+            raise RuntimeError("Encryptor not initialised.")
+        chunk = self._encryptor.update(data)
+        if chunk:
+            self._out_fh.write(chunk)
+        return len(data)
+
+    def flush(self):
+        if hasattr(self._out_fh, "flush"):
+            self._out_fh.flush()
+
+    def _finalize(self):
+        if self._finalized or self._encryptor is None:
+            return
+        tail = self._encryptor.finalize()
+        if tail:
+            self._out_fh.write(tail)
+        self._out_fh.write(self._encryptor.tag)
+        self._finalized = True
+
+    def close(self):
+        self._finalize()
+
+    def __exit__(self, exc_type, exc, tb):
+        self._finalize()
+        return False
 
 
-def decrypt_data(encrypted_data: bytes, password: str) -> bytes:
-    """Decrypt AES-256-GCM encrypted data."""
-    if not CRYPTO_AVAILABLE:
-        raise RuntimeError("Cryptography library not installed.")
-    salt = encrypted_data[:SALT_SIZE]
-    nonce = encrypted_data[SALT_SIZE : SALT_SIZE + NONCE_SIZE]
-    ciphertext = encrypted_data[SALT_SIZE + NONCE_SIZE :]
-    key = derive_key(password, salt)
-    aesgcm = AESGCM(key)
-    return aesgcm.decrypt(nonce, ciphertext, None)
+class AESGCMDecryptReader(io.RawIOBase):
+    """Stream wrapper that decrypts AES-256-GCM ciphertext on demand."""
+
+    def __init__(self, password: str, in_fh: IO[bytes]):
+        if not CRYPTO_AVAILABLE:
+            raise RuntimeError("Cryptography library not installed.")
+        self._in_fh = in_fh
+        salt = in_fh.read(SALT_SIZE)
+        nonce = in_fh.read(NONCE_SIZE)
+        if len(salt) != SALT_SIZE or len(nonce) != NONCE_SIZE:
+            raise ValueError("Encrypted数据格式无效，缺少头部信息。")
+        key = derive_key(password, salt)
+        cipher = Cipher(algorithms.AES(key), modes.GCM(nonce))
+        self._decryptor = cipher.decryptor()
+        self._cipher_tail = bytearray()
+        self._plaintext_buffer = bytearray()
+        self._finalized = False
+
+    def __enter__(self) -> "AESGCMDecryptReader":
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self.close()
+        except Exception:
+            if exc_type is None:
+                raise
+        return False
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:  # type: ignore[override]
+        if size == 0:
+            return b""
+        if size is None or size < 0:
+            self._consume_all()
+            return self._drain()
+
+        while len(self._plaintext_buffer) < size and not self._finalized:
+            if not self._read_chunk():
+                break
+
+        return self._drain(size)
+
+    def close(self) -> None:  # type: ignore[override]
+        try:
+            self._consume_all()
+        finally:
+            self._in_fh.close()
+        super().close()
+
+    def _read_chunk(self) -> bool:
+        if self._finalized:
+            return False
+        chunk = self._in_fh.read(CHUNK_SIZE)
+        if chunk:
+            self._cipher_tail.extend(chunk)
+            self._process_tail(final=False)
+            return True
+        self._process_tail(final=True)
+        return False
+
+    def _consume_all(self):
+        while not self._finalized and self._read_chunk():
+            pass
+
+    def _process_tail(self, final: bool) -> None:
+        if self._finalized:
+            return
+
+        if final:
+            if len(self._cipher_tail) < TAG_SIZE:
+                raise ValueError("Encrypted数据格式无效，缺少认证标签。")
+            body = bytes(self._cipher_tail[:-TAG_SIZE])
+            tag = bytes(self._cipher_tail[-TAG_SIZE:])
+            self._cipher_tail.clear()
+            if body:
+                self._plaintext_buffer.extend(self._decryptor.update(body))
+            tail = self._decryptor.finalize_with_tag(tag)
+            if tail:
+                self._plaintext_buffer.extend(tail)
+            self._finalized = True
+            return
+
+        if len(self._cipher_tail) <= TAG_SIZE:
+            return
+
+        body = bytes(self._cipher_tail[:-TAG_SIZE])
+        self._cipher_tail = bytearray(self._cipher_tail[-TAG_SIZE:])
+        if body:
+            self._plaintext_buffer.extend(self._decryptor.update(body))
+
+    def _drain(self, size: int | None = None) -> bytes:
+        if size is None or size < 0 or size >= len(self._plaintext_buffer):
+            data = bytes(self._plaintext_buffer)
+            self._plaintext_buffer.clear()
+            return data
+        if size == 0:
+            return b""
+        data = bytes(self._plaintext_buffer[:size])
+        del self._plaintext_buffer[:size]
+        return data
 
 
 # --- Core Logic Class ---
@@ -213,25 +346,17 @@ class ZstdToolbox:
                 file_paths = [p for p in in_path.rglob("*") if p.is_file()]
                 total_size = sum(p.stat().st_size for p in file_paths)
 
-                # The data must be compressed first, then encrypted. Streaming encryption is complex.
-                # So we compress to a temp file if encryption is needed.
                 if password:
-                    temp_path = out_path.with_suffix(".tmp")
-                    with temp_path.open(
+                    with out_path.open(
                         "wb"
-                    ) as f_out, self._create_progress_bar() as progress:
-                        # We need a custom tar stream handler here
+                    ) as raw_out, self._create_progress_bar() as progress:
                         task = progress.add_task("压缩中", total=total_size)
-                        with cctx.stream_writer(f_out) as compressor:
-                            with tarfile.open(fileobj=compressor, mode="w|") as tar:
-                                for p in file_paths:
-                                    tar.add(str(p), arcname=str(p.relative_to(in_path)))
-                                    progress.update(task, advance=p.stat().st_size)
-
-                    self.console.print("加密中...")
-                    final_data = encrypt_data(temp_path.read_bytes(), password)
-                    out_path.write_bytes(final_data)
-                    temp_path.unlink()
+                        with AESGCMEncryptWriter(password, raw_out) as encrypted_out:
+                            with cctx.stream_writer(encrypted_out) as compressor:
+                                with tarfile.open(fileobj=compressor, mode="w|") as tar:
+                                    for p in file_paths:
+                                        tar.add(str(p), arcname=str(p.relative_to(in_path)))
+                                        progress.update(task, advance=p.stat().st_size)
                 else:
                     # Stream directly if no encryption
                     with out_path.open(
@@ -246,9 +371,11 @@ class ZstdToolbox:
             else:  # It's a file
                 total_size = in_path.stat().st_size
                 if password:
-                    compressed_data = cctx.compress(in_path.read_bytes())
-                    final_data = encrypt_data(compressed_data, password)
-                    out_path.write_bytes(final_data)
+                    with in_path.open("rb") as f_in, out_path.open("wb") as f_out:
+                        with AESGCMEncryptWriter(password, f_out) as encrypted_out:
+                            self._stream_processor(
+                                f_in, encrypted_out, cctx.stream_writer, total_size, "压缩中"
+                            )
                 else:
                     with in_path.open("rb") as f_in, out_path.open("wb") as f_out:
                         self._stream_processor(
@@ -262,8 +389,6 @@ class ZstdToolbox:
             self.console.print(f"\n[bold red]✗ 操作失败: {e}[/bold red]")
             if "out_path" in locals() and out_path.exists():
                 out_path.unlink(missing_ok=True)
-            if "temp_path" in locals() and temp_path.exists():
-                temp_path.unlink(missing_ok=True)
 
     def decompress(self):
         self.console.print(
@@ -296,34 +421,40 @@ class ZstdToolbox:
 
         try:
             dctx = zstd.ZstdDecompressor()
-            in_data = in_path.read_bytes()
-            if password:
-                self.console.print("解密中...")
-                in_data = decrypt_data(in_data, password)
+            total_size = in_path.stat().st_size
 
-            total_size = len(in_data)
-
-            with self._create_progress_bar() as progress:
-                task = progress.add_task("解压中", total=total_size)
-                if is_tar:
-                    out_path.mkdir(exist_ok=True)
-                    with dctx.stream_reader(in_data) as reader:
-                        with tarfile.open(fileobj=reader, mode="r|*") as tar:
-                            # We cannot easily track tar extraction progress file by file without complexity
-                            tar.extractall(path=out_path)
-                            progress.update(
-                                task, completed=total_size
-                            )  # Mark as complete
+            with in_path.open("rb") as f_in, ExitStack() as stack:
+                if password:
+                    self.console.print("解密中...")
+                    source: IO[bytes] = stack.enter_context(
+                        AESGCMDecryptReader(password, f_in)
+                    )
                 else:
-                    with out_path.open("wb") as f_out:
-                        f_out.write(dctx.decompress(in_data))
+                    source = f_in
+
+                with self._create_progress_bar() as progress:
+                    task = progress.add_task("解压中", total=total_size)
+                    if is_tar:
+                        out_path.mkdir(exist_ok=True)
+                        with dctx.stream_reader(source) as reader:
+                            with tarfile.open(fileobj=reader, mode="r|*") as tar:
+                                tar.extractall(path=out_path)
                         progress.update(task, completed=total_size)
+                    else:
+                        with out_path.open("wb") as f_out:
+                            with dctx.stream_reader(source) as reader:
+                                while chunk := reader.read(CHUNK_SIZE):
+                                    f_out.write(chunk)
+                                    progress.update(task, advance=len(chunk))
+                            progress.update(task, completed=total_size)
 
             self.console.print("\n[bold green]✓ 操作成功！[/bold green]")
         except InvalidTag:
             self.console.print(
                 "\n[bold red]✗ 解密失败！密码错误或文件已损坏。[/bold red]"
             )
+        except ValueError as e:
+            self.console.print(f"\n[bold red]✗ 解密失败: {e}[/bold red]")
         except zstd.ZstdError as e:
             self.console.print(
                 f"\n[bold red]✗ 解压失败: Zstandard 错误 - {e}[/bold red]"
