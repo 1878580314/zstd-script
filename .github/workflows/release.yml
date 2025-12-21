@@ -27,6 +27,11 @@ jobs:
             archive_name: zstd-windows.zip
             artifact_name: zstd-windows
             executable: zstd.exe
+          - os: macos-latest
+            python: '3.11'
+            archive_name: zstd-macos.tar.gz
+            artifact_name: zstd-macos
+            executable: zstd
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,13 +44,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install zstandard rich cryptography pyinstaller
+          python -m pip install zstandard rich cryptography typer pyinstaller
 
       - name: Build executable
         run: pyinstaller --onefile --name zstd zstd.py
 
-      - name: Package artifact (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Package artifact (Unix)
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           tar -czf ${{ matrix.archive_name }} -C dist ${{ matrix.executable }}
@@ -83,4 +88,5 @@ jobs:
           files: |
             artifacts/zstd-linux/zstd-linux.tar.gz
             artifacts/zstd-windows/zstd-windows.zip
+            artifacts/zstd-macos/zstd-macos.tar.gz
           generate_release_notes: true
