@@ -1,121 +1,80 @@
-# ZARC Studio (Rust + Tauri)
+# ZARC Studio
 
-现代化、高性能、轻量化的桌面归档工具，核心能力已迁移到 Rust 技术栈：
+该仓库已重构为 `Rust + Tauri` 桌面应用，提供：
 
-- 流式 `zstd` 压缩与解压
-- 可选流式 `AES-256-GCM` 加密（`ZARCv2` 格式）
-- 归档完整性校验（无需落盘提取）
-- 解压缩性能测试（预热 + 多轮统计 + 吞吐结果）
-- 精致现代化桌面 UI（Tauri + React）
+- 高性能 `zstd` 压缩与解压
+- 文件与目录归档（目录打包为 `.tar.zst`）
+- 精准解压性能测试（预热、多轮采样、吞吐统计）
+- 浅色系、轻量化跨平台 UI
 
-## 项目结构
-
-- `zarc-desktop/src-tauri`: Rust 核心后端（压缩 / 解压 / 校验）
-- `zarc-desktop/src-tauri`: Rust 核心后端（压缩 / 解压 / 校验 / 性能测试）
-- `zarc-desktop/src`: 桌面前端 UI
-- `zstd.py`: 历史 Python 版本（保留作参考）
-
-## 功能说明
-
-1. 压缩模式
-- 支持文件压缩为 `.zst`
-- 支持目录打包压缩为 `.tar.zst`
-- 可选加密输出为 `.enc`
-
-2. 解压模式
-- 自动识别加密头 `ZARCv2`
-- 自动支持 `.zst` / `.tar.zst` / `.enc`
-
-3. 校验模式
-- 流式验证归档可读性
-- 加密归档会校验密码与认证标签
-
-4. 性能测试模式
-- 针对解压缩流程做基准测试（默认 1 轮预热 + 3 轮统计）
-- 输出平均值/中位数/最优吞吐（MB/s）
-- 测试时写入 `sink`，避免落盘写入开销干扰解压缩性能
-
-## 本地运行
-
-Linux（Arch）先安装系统依赖：
-
-```bash
-sudo pacman -Syu --needed webkit2gtk libsoup gtk3 base-devel pkgconf
-```
-
-前端依赖安装：
+## 开发运行
 
 ```bash
 cd zarc-desktop
 npm install
-```
-
-开发模式：
-
-```bash
 npm run tauri dev
 ```
 
-默认打包：
-
-```bash
-npm run tauri build
-```
-
-## 全平台可执行文件打包（优化版）
-
-本项目已配置为 Tauri 全平台发布流：
-
-- Linux: `.deb` + `.AppImage`
-- Windows: `.msi`
-- macOS: `.dmg`
-
-### 本地按平台打包
+## 打包
 
 ```bash
 cd zarc-desktop
-npm run tauri:bundle:linux
-npm run tauri:bundle:windows
-npm run tauri:bundle:macos
+npm install
+npm run tauri build
 ```
 
-产物目录：
+## Windows 打包 (优化)
 
-- `zarc-desktop/src-tauri/target/release/bundle/deb`
-- `zarc-desktop/src-tauri/target/release/bundle/appimage`
-- `zarc-desktop/src-tauri/target/release/bundle/msi`
-- `zarc-desktop/src-tauri/target/release/bundle/dmg`
+在 Windows 10/11 环境中执行：
 
-### GitHub Actions 自动发布
+```powershell
+cd zarc-desktop
+npm install
+npm run tauri:build:win
+```
 
-工作流：`.github/workflows/release.yml`
+产物默认位于：
 
-- 推送标签 `v*`（如 `v2.1.0`）会自动触发三平台构建
-- 自动将产物上传并附加到 GitHub Release
+- `zarc-desktop/src-tauri/target/release/bundle/msi/`
 
-示例：
+本项目已启用发布优化（`LTO + strip + panic=abort + codegen-units=1`），用于提升性能并减小安装包体积。
+
+## GitHub 自动构建与发布
+
+仓库已配置跨平台自动构建工作流：
+
+- `push main`：自动构建 Linux(`.deb/.AppImage`) + Windows(`.msi`) + macOS(`.dmg`) 并上传为 Actions artifacts
+- `pull_request -> main`：自动执行同样的三平台构建校验
+- `push tag v*`：构建三平台产物并自动创建 GitHub Release，附带安装包
+- `workflow_dispatch`：可手动触发一次完整构建/发布流程
+
+## WSL 图形驱动告警排障
+
+如果出现以下日志：
+
+- `libEGL warning: failed to get driver name for fd -1`
+- `MESA: error: ZINK: vkEnumeratePhysicalDevices failed`
+- `egl: failed to create dri2 screen`
+
+可使用软件渲染模式启动：
 
 ```bash
-git tag v2.1.1
-git push origin v2.1.1
+cd zarc-desktop
+npm run tauri:dev:wsl
 ```
 
-### Linux AppImage 常见问题（Arch）
+如果你希望继续使用硬件加速，请先在 Windows 侧更新 WSLg 与显卡驱动，然后重启 WSL：
 
-若本地打包 `AppImage` 时报错（如 `unknown type [0x13] section '.relr.dyn'`），通常是本机系统库与 linuxdeploy 内置 strip 兼容性问题。
+```powershell
+wsl --update
+wsl --shutdown
+```
 
-建议：
+## 性能测试说明
 
-1. 本地先产出 `.deb`（稳定）
-2. `AppImage` 交给 GitHub Actions 的 Ubuntu Runner 生成
-3. 或在 Ubuntu 容器/虚拟机中打包 `AppImage`
+在 UI 的“解压性能测试”中：
 
-## 说明
+- `纯解码 (推荐)`：只测 zstd 解码，默认可将压缩数据预加载到内存，减少磁盘抖动
+- `解码 + 解包`：对 `.tar.zst` 执行完整解码与解包，更贴近端到端场景
 
-- 本仓库当前环境若离线，`cargo`/`npm` 依赖下载会失败；联网后即可正常构建。
-- Rust release 配置已启用 `LTO + strip + codegen-units=1`，兼顾性能与体积。
-- Rust 后端命令：
-  - `compress(source, output, password?, level?)`
-  - `decompress(source, output, password?)`
-  - `verify(source, password?)`
-  - `benchmark_decompress(source, password?, warmup_runs?, measured_runs?)`
+会输出平均值、中位数、P95、标准差、吞吐等指标。

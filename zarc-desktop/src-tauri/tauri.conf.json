@@ -1,60 +1,43 @@
 {
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "ZARC Studio",
+  "version": "0.1.0",
+  "identifier": "com.timerain.zarcstudio",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devPath": "http://localhost:1420",
-    "distDir": "../dist",
-    "withGlobalTauri": true
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
   },
-  "package": {
-    "productName": "ZARC Studio",
-    "version": "2.1.1"
-  },
-  "tauri": {
-    "allowlist": {
-      "all": false,
-      "shell": {
-        "all": false,
-        "open": true
-      },
-      "dialog": {
-        "all": true
-      },
-      "fs": {
-        "all": true,
-        "scope": ["**"]
-      }
-    },
+  "app": {
     "windows": [
       {
+        "label": "main",
         "title": "ZARC Studio",
-        "width": 960,
-        "height": 760,
-        "minWidth": 760,
-        "minHeight": 620,
+        "width": 1260,
+        "height": 860,
+        "minWidth": 980,
+        "minHeight": 680,
         "resizable": true,
-        "fullscreen": false,
-        "decorations": true,
-        "transparent": false
+        "fullscreen": false
       }
     ],
     "security": {
       "csp": null
-    },
-    "bundle": {
-      "active": true,
-      "targets": ["deb", "appimage", "msi", "dmg"],
-      "identifier": "com.zarc.studio",
-      "category": "Utility",
-      "shortDescription": "High-performance secure zstd archiver",
-      "longDescription": "ZARC Studio is a modern Rust-powered desktop archiver with streaming zstd compression and optional AES-256-GCM encryption.",
-      "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.ico",
-        "icons/icon.icns"
-      ]
     }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "High-performance zstd toolbox",
+    "longDescription": "Cross-platform zstd app with precise decompression benchmark and light polished interface.",
+    "category": "Utility"
   }
 }

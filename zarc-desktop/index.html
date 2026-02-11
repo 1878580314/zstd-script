@@ -4,9 +4,116 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ZARC Studio</title>
+    <link rel="icon" href="data:," />
+    <script type="module" src="/src/main.ts"></script>
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div class="orb orb-a"></div>
+    <div class="orb orb-b"></div>
+    <div class="app">
+      <header class="hero fade-up">
+        <p class="eyebrow">Rust + Tauri • Cross Platform</p>
+        <h1>ZARC Studio</h1>
+        <p class="subtitle">高性能压缩解压与精准解压性能测试</p>
+      </header>
+
+      <main class="grid">
+        <section class="card fade-up" style="--delay: 80ms">
+          <h2>压缩</h2>
+          <p class="hint">支持单文件 `.zst` 与目录 `.tar.zst` 打包压缩。</p>
+
+          <div class="inline-actions">
+            <button id="pickCompressFile" type="button">选择文件</button>
+            <button id="pickCompressDirectory" type="button">选择目录</button>
+            <span id="compressKindTag" class="tag">当前: 文件</span>
+          </div>
+
+          <label for="compressSource">源路径</label>
+          <input id="compressSource" readonly placeholder="请选择待压缩源" />
+
+          <label for="compressOutput">输出路径 (可选)</label>
+          <div class="row">
+            <input id="compressOutput" placeholder="留空自动生成" />
+            <button id="pickCompressOutput" class="ghost" type="button">保存到...</button>
+          </div>
+
+          <label for="compressLevel">压缩等级: <span id="compressLevelLabel">8</span></label>
+          <input id="compressLevel" type="range" min="1" max="22" value="8" />
+
+          <label class="checkbox">
+            <input id="includeRootDir" type="checkbox" checked />
+            <span>目录压缩时包含根目录</span>
+          </label>
+
+          <button id="compressSubmit" class="primary" type="button">开始压缩</button>
+          <pre id="compressResult" class="result"></pre>
+        </section>
+
+        <section class="card fade-up" style="--delay: 140ms">
+          <h2>解压</h2>
+          <p class="hint">自动识别 `.zst` 与 `.tar.zst`，可自定义输出位置。</p>
+
+          <label for="decompressSource">归档文件</label>
+          <div class="row">
+            <input id="decompressSource" readonly placeholder="请选择归档文件" />
+            <button id="pickDecompressSource" class="ghost" type="button">选择文件</button>
+          </div>
+
+          <label for="decompressOutput">输出路径 (可选)</label>
+          <div class="row">
+            <input id="decompressOutput" placeholder="留空自动推断" />
+            <button id="pickDecompressOutput" class="ghost" type="button">选择位置</button>
+          </div>
+
+          <button id="decompressSubmit" class="primary" type="button">开始解压</button>
+          <pre id="decompressResult" class="result"></pre>
+        </section>
+
+        <section class="card benchmark fade-up" style="--delay: 200ms">
+          <h2>解压性能测试</h2>
+          <p class="hint">提供预热、多轮采样与吞吐统计，适合压缩算法调优。</p>
+
+          <label for="benchmarkSource">归档文件</label>
+          <div class="row">
+            <input id="benchmarkSource" readonly placeholder="请选择待测试归档" />
+            <button id="pickBenchmarkSource" class="ghost" type="button">选择文件</button>
+          </div>
+
+          <div class="two-col">
+            <div>
+              <label for="benchmarkIterations">采样轮数</label>
+              <input id="benchmarkIterations" type="number" min="3" max="200" value="12" />
+            </div>
+            <div>
+              <label for="benchmarkWarmup">预热轮数</label>
+              <input id="benchmarkWarmup" type="number" min="0" max="100" value="3" />
+            </div>
+          </div>
+
+          <div class="two-col">
+            <div>
+              <label for="benchmarkMode">模式</label>
+              <select id="benchmarkMode">
+                <option value="decodeOnly">纯解码 (推荐)</option>
+                <option value="extractArchive">解码 + 解包</option>
+              </select>
+            </div>
+            <label class="checkbox">
+              <input id="benchmarkInMemory" type="checkbox" checked />
+              <span>将压缩数据加载到内存以减小磁盘抖动</span>
+            </label>
+          </div>
+
+          <button id="benchmarkSubmit" class="primary" type="button">开始性能测试</button>
+
+          <div id="benchmarkSummary" class="summary"></div>
+          <div id="benchmarkBars" class="bars"></div>
+        </section>
+      </main>
+
+      <footer class="status-wrap fade-up" style="--delay: 260ms">
+        <p id="status" class="status">就绪</p>
+      </footer>
+    </div>
   </body>
 </html>
