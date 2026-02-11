@@ -1,14 +1,19 @@
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Cursor, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
 const IO_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const MIB: f64 = 1024.0 * 1024.0;
+const PROGRESS_EVENT: &str = "zarc://progress";
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,11 +34,12 @@ struct DecompressRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BenchmarkRequest {
-    archive_path: String,
+    source_path: String,
+    min_level: Option<u8>,
+    max_level: Option<u8>,
     iterations: Option<u32>,
-    warmup: Option<u32>,
-    mode: Option<String>,
-    in_memory: Option<bool>,
+    sample_size_mib: Option<u32>,
+    threads: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,28 +55,42 @@ struct OperationReport {
     compression_ratio: Option<f64>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CompressionLevelReport {
+    level: u8,
+    mean_ms: f64,
+    mean_throughput_mi_bs: f64,
+    compressed_bytes: u64,
+    ratio_percent: f64,
+    score: f64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BenchmarkReport {
-    archive_path: String,
-    mode: String,
-    in_memory: bool,
-    warmup: u32,
+    source_path: String,
+    sample_bytes: u64,
+    min_level: u8,
+    max_level: u8,
     iterations: u32,
-    compressed_bytes: u64,
-    decompressed_bytes: u64,
-    sample_ms: Vec<f64>,
-    throughput_mi_bs_samples: Vec<f64>,
-    mean_ms: f64,
-    median_ms: f64,
-    p95_ms: f64,
-    min_ms: f64,
-    max_ms: f64,
-    stddev_ms: f64,
-    mean_throughput_mi_bs: f64,
-    best_throughput_mi_bs: f64,
-    worst_throughput_mi_bs: f64,
+    threads: u32,
+    recommended_level: u8,
+    results: Vec<CompressionLevelReport>,
     note: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ProgressPayload {
+    operation: String,
+    processed_bytes: u64,
+    total_bytes: u64,
+    percent: f64,
+    throughput_mi_bs: f64,
+    eta_seconds: Option<f64>,
+    done: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -79,34 +99,162 @@ enum ArchiveKind {
     Zst,
 }
 
-#[derive(Debug, Copy, Clone)]
-enum BenchmarkMode {
-    DecodeOnly,
-    ExtractArchive,
+struct ProgressState {
+    started: Instant,
+    processed: AtomicU64,
+    last_emit: Mutex<Instant>,
 }
 
-impl BenchmarkMode {
-    fn parse(mode: Option<&str>) -> Result<Self> {
-        match mode.unwrap_or("decodeOnly") {
-            "decodeOnly" => Ok(Self::DecodeOnly),
-            "extractArchive" => Ok(Self::ExtractArchive),
-            other => bail!("不支持的 benchmark 模式: {other}"),
+#[derive(Clone)]
+struct ProgressReporter {
+    app: AppHandle,
+    operation: &'static str,
+    total: u64,
+    state: Arc<ProgressState>,
+}
+
+impl ProgressReporter {
+    fn new(app: AppHandle, operation: &'static str, total: u64) -> Self {
+        let now = Instant::now();
+        Self {
+            app,
+            operation,
+            total,
+            state: Arc::new(ProgressState {
+                started: now,
+                processed: AtomicU64::new(0),
+                last_emit: Mutex::new(now - PROGRESS_EMIT_INTERVAL),
+            }),
         }
     }
 
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::DecodeOnly => "decodeOnly",
-            Self::ExtractArchive => "extractArchive",
+    fn begin(&self) {
+        self.emit(false, None, true);
+    }
+
+    fn advance(&self, delta: u64) {
+        if delta > 0 {
+            self.state
+                .processed
+                .fetch_add(delta, AtomicOrdering::Relaxed);
+            self.emit(false, None, false);
         }
+    }
+
+    fn finish(&self) {
+        self.state
+            .processed
+            .store(self.total, AtomicOrdering::Relaxed);
+        self.emit(true, None, true);
+    }
+
+    fn fail(&self, message: String) {
+        self.emit(true, Some(message), true);
+    }
+
+    fn emit(&self, done: bool, error: Option<String>, force: bool) {
+        {
+            let mut last_emit = self
+                .state
+                .last_emit
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if !force && !done && last_emit.elapsed() < PROGRESS_EMIT_INTERVAL {
+                return;
+            }
+            *last_emit = Instant::now();
+        }
+
+        let processed = self
+            .state
+            .processed
+            .load(AtomicOrdering::Relaxed)
+            .min(self.total);
+
+        let elapsed = self.state.started.elapsed().as_secs_f64().max(f64::EPSILON);
+        let throughput = throughput(processed, elapsed);
+        let percent = if self.total == 0 {
+            100.0
+        } else {
+            processed as f64 / self.total as f64 * 100.0
+        };
+
+        let eta_seconds = if done || throughput <= 0.0 || processed >= self.total {
+            None
+        } else {
+            let remaining_mib = (self.total.saturating_sub(processed) as f64) / MIB;
+            Some(remaining_mib / throughput)
+        };
+
+        let payload = ProgressPayload {
+            operation: self.operation.to_string(),
+            processed_bytes: processed,
+            total_bytes: self.total,
+            percent: percent.clamp(0.0, 100.0),
+            throughput_mi_bs: throughput,
+            eta_seconds,
+            done,
+            error,
+        };
+
+        let _ = self.app.emit(PROGRESS_EVENT, payload);
+    }
+}
+
+struct ProgressReader<R> {
+    inner: R,
+    reporter: ProgressReporter,
+}
+
+impl<R> ProgressReader<R> {
+    fn new(inner: R, reporter: ProgressReporter) -> Self {
+        Self { inner, reporter }
+    }
+}
+
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        if count > 0 {
+            self.reporter.advance(count as u64);
+        }
+        Ok(count)
+    }
+}
+
+struct CountingWriter<W> {
+    inner: W,
+    written: u64,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, written: 0 }
+    }
+
+    fn written(&self) -> u64 {
+        self.written
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let count = self.inner.write(buf)?;
+        self.written = self.written.saturating_add(count as u64);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 }
 
 #[tauri::command]
 async fn compress_archive(
+    app: AppHandle,
     request: CompressRequest,
 ) -> std::result::Result<OperationReport, String> {
-    tauri::async_runtime::spawn_blocking(move || compress_archive_sync(request))
+    tauri::async_runtime::spawn_blocking(move || compress_archive_sync(request, app))
         .await
         .map_err(|err| format!("任务线程异常: {err}"))?
         .map_err(|err| err.to_string())
@@ -114,25 +262,26 @@ async fn compress_archive(
 
 #[tauri::command]
 async fn decompress_archive(
+    app: AppHandle,
     request: DecompressRequest,
 ) -> std::result::Result<OperationReport, String> {
-    tauri::async_runtime::spawn_blocking(move || decompress_archive_sync(request))
+    tauri::async_runtime::spawn_blocking(move || decompress_archive_sync(request, app))
         .await
         .map_err(|err| format!("任务线程异常: {err}"))?
         .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-async fn benchmark_decompression(
+async fn benchmark_compression(
     request: BenchmarkRequest,
 ) -> std::result::Result<BenchmarkReport, String> {
-    tauri::async_runtime::spawn_blocking(move || benchmark_decompression_sync(request))
+    tauri::async_runtime::spawn_blocking(move || benchmark_compression_sync(request))
         .await
         .map_err(|err| format!("任务线程异常: {err}"))?
         .map_err(|err| err.to_string())
 }
 
-fn compress_archive_sync(request: CompressRequest) -> Result<OperationReport> {
+fn compress_archive_sync(request: CompressRequest, app: AppHandle) -> Result<OperationReport> {
     let source = PathBuf::from(request.source_path.trim());
     if !source.exists() {
         bail!("源路径不存在: {}", source.display());
@@ -148,13 +297,23 @@ fn compress_archive_sync(request: CompressRequest) -> Result<OperationReport> {
             .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
     }
 
-    let started = Instant::now();
+    let reporter = ProgressReporter::new(app, "compress", source_bytes);
+    reporter.begin();
 
-    if source.is_dir() {
-        compress_directory(&source, &output, level, include_root_dir)?;
+    let started = Instant::now();
+    let operation_result = if source.is_dir() {
+        compress_directory(&source, &output, level, include_root_dir, &reporter)
     } else {
-        compress_file(&source, &output, level)?;
+        compress_file(&source, &output, level, &reporter)
+    };
+
+    if let Err(err) = operation_result {
+        let _ = fs::remove_file(&output);
+        reporter.fail(err.to_string());
+        return Err(err);
     }
+
+    reporter.finish();
 
     let duration = started.elapsed().as_secs_f64();
     let output_bytes = fs::metadata(&output)
@@ -173,7 +332,7 @@ fn compress_archive_sync(request: CompressRequest) -> Result<OperationReport> {
     })
 }
 
-fn decompress_archive_sync(request: DecompressRequest) -> Result<OperationReport> {
+fn decompress_archive_sync(request: DecompressRequest, app: AppHandle) -> Result<OperationReport> {
     let archive = PathBuf::from(request.archive_path.trim());
     if !archive.exists() {
         bail!("归档文件不存在: {}", archive.display());
@@ -190,17 +349,29 @@ fn decompress_archive_sync(request: DecompressRequest) -> Result<OperationReport
             .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
     }
 
-    let started = Instant::now();
+    let reporter = ProgressReporter::new(app, "decompress", source_bytes);
+    reporter.begin();
 
-    let output_bytes = match archive_kind {
+    let started = Instant::now();
+    let operation_result = match archive_kind {
         ArchiveKind::TarZst => {
             fs::create_dir_all(&output)
                 .with_context(|| format!("无法创建解压目录: {}", output.display()))?;
-            decompress_tar_archive(&archive, &output)?;
-            count_source_bytes(&output)?
+            decompress_tar_archive(&archive, &output, &reporter)?;
+            Ok(count_source_bytes(&output)?)
         }
-        ArchiveKind::Zst => decompress_single_file(&archive, &output)?,
+        ArchiveKind::Zst => decompress_single_file(&archive, &output, &reporter),
     };
+
+    let output_bytes = match operation_result {
+        Ok(value) => value,
+        Err(err) => {
+            reporter.fail(err.to_string());
+            return Err(err);
+        }
+    };
+
+    reporter.finish();
 
     let duration = started.elapsed().as_secs_f64();
 
@@ -216,123 +387,202 @@ fn decompress_archive_sync(request: DecompressRequest) -> Result<OperationReport
     })
 }
 
-fn benchmark_decompression_sync(request: BenchmarkRequest) -> Result<BenchmarkReport> {
-    let archive = PathBuf::from(request.archive_path.trim());
-    if !archive.exists() {
-        bail!("归档文件不存在: {}", archive.display());
+fn benchmark_compression_sync(request: BenchmarkRequest) -> Result<BenchmarkReport> {
+    let source = PathBuf::from(request.source_path.trim());
+    if !source.exists() {
+        bail!("源路径不存在: {}", source.display());
     }
 
-    let archive_kind = detect_archive_kind(&archive)?;
-    let mode = BenchmarkMode::parse(request.mode.as_deref())?;
-    if matches!(mode, BenchmarkMode::ExtractArchive) && !matches!(archive_kind, ArchiveKind::TarZst)
-    {
-        bail!("extractArchive 模式仅支持 .tar.zst 文件");
+    let mut min_level = request.min_level.unwrap_or(1).clamp(1, 22);
+    let mut max_level = request.max_level.unwrap_or(12).clamp(1, 22);
+    if min_level > max_level {
+        std::mem::swap(&mut min_level, &mut max_level);
     }
 
-    let iterations = request.iterations.unwrap_or(12).clamp(3, 200);
-    let warmup = request.warmup.unwrap_or(3).clamp(0, 100);
-    let in_memory = request.in_memory.unwrap_or(true);
+    let iterations = request.iterations.unwrap_or(2).clamp(1, 12);
+    let sample_size_mib = request.sample_size_mib.unwrap_or(64).clamp(4, 1024);
+    let sample_limit = sample_size_mib as usize * 1024 * 1024;
 
-    let compressed_bytes = fs::metadata(&archive)
-        .with_context(|| format!("无法读取归档信息: {}", archive.display()))?
-        .len();
+    let cpu_threads = num_cpus::get().max(1) as u32;
+    let threads = request
+        .threads
+        .unwrap_or(cpu_threads)
+        .clamp(1, cpu_threads.max(1));
 
-    let compressed_data = if in_memory {
-        Some(
-            fs::read(&archive)
-                .with_context(|| format!("无法读取归档到内存: {}", archive.display()))?,
-        )
-    } else {
-        None
-    };
-
-    let run_once = || -> Result<u64> {
-        match mode {
-            BenchmarkMode::DecodeOnly => {
-                if let Some(data) = compressed_data.as_deref() {
-                    decode_to_sink_from_bytes(data)
-                } else {
-                    decode_to_sink_from_file(&archive)
-                }
-            }
-            BenchmarkMode::ExtractArchive => {
-                if let Some(data) = compressed_data.as_deref() {
-                    extract_archive_from_bytes(data)
-                } else {
-                    extract_archive_from_file(&archive)
-                }
-            }
-        }
-    };
-
-    let mut decompressed_bytes = 0_u64;
-
-    for _ in 0..warmup {
-        decompressed_bytes = run_once()?;
+    let sample = load_benchmark_sample(&source, sample_limit)?;
+    if sample.is_empty() {
+        bail!("基准测试样本为空，无法评估压缩等级");
     }
 
-    let mut sample_ms = Vec::with_capacity(iterations as usize);
-    let mut throughput_samples = Vec::with_capacity(iterations as usize);
+    let sample_bytes = sample.len() as u64;
+    let mut results = Vec::new();
 
-    for _ in 0..iterations {
-        let start = Instant::now();
-        let bytes = run_once()?;
-        let elapsed = start.elapsed().as_secs_f64();
+    for level in min_level..=max_level {
+        let mut ms_samples = Vec::with_capacity(iterations as usize);
+        let mut throughput_samples = Vec::with_capacity(iterations as usize);
+        let mut compressed_bytes = 0_u64;
 
-        if decompressed_bytes == 0 {
-            decompressed_bytes = bytes;
-        }
-        if bytes != decompressed_bytes {
-            bail!(
-                "基准测试中解压字节数不一致: 期望 {}, 实际 {}",
-                decompressed_bytes,
-                bytes
-            );
+        for _ in 0..iterations {
+            let start = Instant::now();
+            compressed_bytes = compress_to_count(&sample, level as i32, threads)?;
+            let elapsed = start.elapsed().as_secs_f64();
+
+            ms_samples.push(elapsed * 1000.0);
+            throughput_samples.push(throughput(sample_bytes, elapsed));
         }
 
-        sample_ms.push(elapsed * 1000.0);
-        throughput_samples.push(throughput(bytes, elapsed));
+        results.push(CompressionLevelReport {
+            level,
+            mean_ms: mean(&ms_samples),
+            mean_throughput_mi_bs: mean(&throughput_samples),
+            compressed_bytes,
+            ratio_percent: ratio(compressed_bytes, sample_bytes),
+            score: 0.0,
+        });
     }
 
-    let sorted_ms = sorted_clone(&sample_ms);
-    let sorted_tp = sorted_clone(&throughput_samples);
+    apply_score(&mut results);
+    let recommended_level = choose_recommended_level(&results)
+        .with_context(|| "无法从 benchmark 结果中推导推荐等级")?;
 
-    let mean_ms = mean(&sample_ms);
-    let mean_tp = mean(&throughput_samples);
-
-    let note = if in_memory {
-        "结果已尽量剔除磁盘 I/O 抖动，更适合压缩算法/参数对比。"
-    } else {
-        "结果包含存储介质影响，更接近端到端真实场景。"
-    }
-    .to_string();
-
-    let stddev_ms = stddev(&sample_ms, mean_ms);
+    let note = format!(
+        "基于样本大小约 {:.2} MiB 的快速压缩测试。推荐等级已平衡压缩率与吞吐。",
+        sample_bytes as f64 / MIB
+    );
 
     Ok(BenchmarkReport {
-        archive_path: path_to_string(&archive),
-        mode: mode.as_str().to_string(),
-        in_memory,
-        warmup,
+        source_path: path_to_string(&source),
+        sample_bytes,
+        min_level,
+        max_level,
         iterations,
-        compressed_bytes,
-        decompressed_bytes,
-        sample_ms,
-        throughput_mi_bs_samples: throughput_samples,
-        mean_ms,
-        median_ms: percentile_sorted(&sorted_ms, 0.50),
-        p95_ms: percentile_sorted(&sorted_ms, 0.95),
-        min_ms: *sorted_ms.first().unwrap_or(&0.0),
-        max_ms: *sorted_ms.last().unwrap_or(&0.0),
-        stddev_ms,
-        mean_throughput_mi_bs: mean_tp,
-        best_throughput_mi_bs: *sorted_tp.last().unwrap_or(&0.0),
-        worst_throughput_mi_bs: *sorted_tp.first().unwrap_or(&0.0),
+        threads,
+        recommended_level,
+        results,
         note,
     })
 }
 
-fn compress_file(source: &Path, output: &Path, level: i32) -> Result<()> {
+fn compress_to_count(data: &[u8], level: i32, threads: u32) -> Result<u64> {
+    let sink = CountingWriter::new(io::sink());
+    let mut encoder = zstd::Encoder::new(sink, level).context("创建 zstd 编码器失败")?;
+    encoder
+        .multithread(threads)
+        .context("无法开启 zstd 多线程压缩")?;
+
+    encoder
+        .write_all(data)
+        .context("写入压缩样本失败，无法完成快速测试")?;
+
+    let mut sink = encoder.finish().context("无法完成压缩编码")?;
+    sink.flush().context("刷新压缩输出失败")?;
+
+    Ok(sink.written())
+}
+
+fn load_benchmark_sample(source: &Path, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut sample = Vec::new();
+    if max_bytes == 0 {
+        return Ok(sample);
+    }
+
+    if source.is_file() {
+        let file = File::open(source)
+            .with_context(|| format!("无法读取基准测试源文件: {}", source.display()))?;
+        let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
+        read_into_sample(&mut reader, &mut sample, max_bytes)?;
+        return Ok(sample);
+    }
+
+    for entry in WalkDir::new(source)
+        .min_depth(1)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let file_path = entry.path();
+        let file = File::open(file_path)
+            .with_context(|| format!("无法读取目录样本文件: {}", file_path.display()))?;
+        let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
+        read_into_sample(&mut reader, &mut sample, max_bytes)?;
+
+        if sample.len() >= max_bytes {
+            break;
+        }
+    }
+
+    Ok(sample)
+}
+
+fn read_into_sample<R: Read>(reader: &mut R, sample: &mut Vec<u8>, max_bytes: usize) -> Result<()> {
+    let mut buffer = vec![0_u8; 256 * 1024];
+
+    while sample.len() < max_bytes {
+        let remaining = max_bytes - sample.len();
+        let read_size = remaining.min(buffer.len());
+        let count = reader
+            .read(&mut buffer[..read_size])
+            .context("读取 benchmark 样本失败")?;
+        if count == 0 {
+            break;
+        }
+        sample.extend_from_slice(&buffer[..count]);
+    }
+
+    Ok(())
+}
+
+fn apply_score(results: &mut [CompressionLevelReport]) {
+    if results.is_empty() {
+        return;
+    }
+
+    let max_throughput = results
+        .iter()
+        .map(|item| item.mean_throughput_mi_bs)
+        .fold(0.0_f64, f64::max)
+        .max(f64::EPSILON);
+
+    let min_ratio = results
+        .iter()
+        .map(|item| item.ratio_percent)
+        .fold(f64::INFINITY, f64::min)
+        .max(f64::EPSILON);
+
+    for item in results.iter_mut() {
+        let speed_score = item.mean_throughput_mi_bs / max_throughput;
+        let ratio_score = min_ratio / item.ratio_percent.max(f64::EPSILON);
+        item.score = speed_score * 0.45 + ratio_score * 0.55;
+    }
+}
+
+fn choose_recommended_level(results: &[CompressionLevelReport]) -> Option<u8> {
+    let mut iter = results.iter();
+    let mut best = iter.next()?;
+
+    for item in iter {
+        let better_score = item.score > best.score + 1e-9;
+        let same_score = (item.score - best.score).abs() <= 1e-9;
+        let better_level = item.level < best.level;
+
+        if better_score || (same_score && better_level) {
+            best = item;
+        }
+    }
+
+    Some(best.level)
+}
+
+fn compress_file(
+    source: &Path,
+    output: &Path,
+    level: i32,
+    reporter: &ProgressReporter,
+) -> Result<()> {
     let input =
         File::open(source).with_context(|| format!("无法打开源文件: {}", source.display()))?;
     let output_file =
@@ -340,14 +590,26 @@ fn compress_file(source: &Path, output: &Path, level: i32) -> Result<()> {
 
     let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, input);
     let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, output_file);
-    let mut encoder = zstd::Encoder::new(writer, level)?;
+    let mut encoder = zstd::Encoder::new(writer, level).context("创建 zstd 编码器失败")?;
 
     let threads = num_cpus::get().max(1) as u32;
     encoder
         .multithread(threads)
         .context("无法开启 zstd 多线程压缩")?;
 
-    io::copy(&mut reader, &mut encoder).context("压缩过程中写入失败")?;
+    let mut buf = vec![0_u8; 512 * 1024];
+    loop {
+        let count = reader.read(&mut buf).context("读取压缩源文件失败")?;
+        if count == 0 {
+            break;
+        }
+
+        encoder
+            .write_all(&buf[..count])
+            .context("压缩过程中写入失败")?;
+        reporter.advance(count as u64);
+    }
+
     let mut writer = encoder.finish().context("无法完成压缩输出")?;
     writer.flush().context("压缩结果刷盘失败")?;
 
@@ -359,11 +621,12 @@ fn compress_directory(
     output: &Path,
     level: i32,
     include_root_dir: bool,
+    reporter: &ProgressReporter,
 ) -> Result<()> {
     let output_file =
         File::create(output).with_context(|| format!("无法创建输出文件: {}", output.display()))?;
     let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, output_file);
-    let mut encoder = zstd::Encoder::new(writer, level)?;
+    let mut encoder = zstd::Encoder::new(writer, level).context("创建 zstd 编码器失败")?;
 
     let threads = num_cpus::get().max(1) as u32;
     encoder
@@ -371,35 +634,43 @@ fn compress_directory(
         .context("无法开启 zstd 多线程压缩")?;
 
     let mut tar_builder = tar::Builder::new(encoder);
+    let root_name = source
+        .file_name()
+        .map(|v| v.to_owned())
+        .with_context(|| format!("目录名称无效: {}", source.display()))?;
 
     if include_root_dir {
-        let root_name = source
-            .file_name()
-            .with_context(|| format!("目录名称无效: {}", source.display()))?;
         tar_builder
-            .append_dir_all(root_name, source)
-            .with_context(|| format!("写入目录归档失败: {}", source.display()))?;
-    } else {
-        for entry in WalkDir::new(source)
-            .min_depth(1)
-            .sort_by_file_name()
-            .into_iter()
-            .filter_map(std::result::Result::ok)
-        {
-            let path = entry.path();
-            let rel = path
-                .strip_prefix(source)
-                .with_context(|| format!("无法计算相对路径: {}", path.display()))?;
+            .append_dir(Path::new(&root_name), source)
+            .with_context(|| format!("写入根目录失败: {}", source.display()))?;
+    }
 
-            if entry.file_type().is_dir() {
-                tar_builder
-                    .append_dir(rel, path)
-                    .with_context(|| format!("写入目录失败: {}", path.display()))?;
-            } else if entry.file_type().is_file() {
-                tar_builder
-                    .append_path_with_name(path, rel)
-                    .with_context(|| format!("写入文件失败: {}", path.display()))?;
-            }
+    for entry in WalkDir::new(source)
+        .min_depth(1)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(source)
+            .with_context(|| format!("无法计算相对路径: {}", path.display()))?;
+
+        let archive_name = if include_root_dir {
+            Path::new(&root_name).join(rel)
+        } else {
+            rel.to_path_buf()
+        };
+
+        if entry.file_type().is_dir() {
+            tar_builder
+                .append_dir(&archive_name, path)
+                .with_context(|| format!("写入目录失败: {}", path.display()))?;
+            continue;
+        }
+
+        if entry.file_type().is_file() {
+            append_file_with_progress(&mut tar_builder, path, &archive_name, reporter)?;
         }
     }
 
@@ -411,11 +682,42 @@ fn compress_directory(
     Ok(())
 }
 
-fn decompress_tar_archive(archive_path: &Path, output_dir: &Path) -> Result<()> {
+fn append_file_with_progress<W: Write>(
+    tar_builder: &mut tar::Builder<W>,
+    source_path: &Path,
+    archive_name: &Path,
+    reporter: &ProgressReporter,
+) -> Result<()> {
+    let file = File::open(source_path)
+        .with_context(|| format!("无法读取待归档文件: {}", source_path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("无法读取文件元数据: {}", source_path.display()))?;
+
+    let mut header = tar::Header::new_gnu();
+    header.set_metadata(&metadata);
+    header.set_cksum();
+
+    let reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
+    let mut progress_reader = ProgressReader::new(reader, reporter.clone());
+
+    tar_builder
+        .append_data(&mut header, archive_name, &mut progress_reader)
+        .with_context(|| format!("写入文件失败: {}", source_path.display()))?;
+
+    Ok(())
+}
+
+fn decompress_tar_archive(
+    archive_path: &Path,
+    output_dir: &Path,
+    reporter: &ProgressReporter,
+) -> Result<()> {
     let input = File::open(archive_path)
         .with_context(|| format!("无法打开归档文件: {}", archive_path.display()))?;
     let reader = BufReader::with_capacity(IO_BUFFER_SIZE, input);
-    let decoder = zstd::Decoder::new(reader).context("创建 zstd 解码器失败")?;
+    let progress_reader = ProgressReader::new(reader, reporter.clone());
+    let decoder = zstd::Decoder::new(progress_reader).context("创建 zstd 解码器失败")?;
 
     let mut archive = tar::Archive::new(decoder);
     archive
@@ -425,60 +727,37 @@ fn decompress_tar_archive(archive_path: &Path, output_dir: &Path) -> Result<()> 
     Ok(())
 }
 
-fn decompress_single_file(archive_path: &Path, output_file: &Path) -> Result<u64> {
+fn decompress_single_file(
+    archive_path: &Path,
+    output_file: &Path,
+    reporter: &ProgressReporter,
+) -> Result<u64> {
     let input = File::open(archive_path)
         .with_context(|| format!("无法打开归档文件: {}", archive_path.display()))?;
     let reader = BufReader::with_capacity(IO_BUFFER_SIZE, input);
-    let mut decoder = zstd::Decoder::new(reader).context("创建 zstd 解码器失败")?;
+    let progress_reader = ProgressReader::new(reader, reporter.clone());
+    let mut decoder = zstd::Decoder::new(progress_reader).context("创建 zstd 解码器失败")?;
 
     let output = File::create(output_file)
         .with_context(|| format!("无法创建输出文件: {}", output_file.display()))?;
     let mut writer = BufWriter::with_capacity(IO_BUFFER_SIZE, output);
 
-    let bytes = io::copy(&mut decoder, &mut writer).context("写入解压输出失败")?;
+    let mut output_bytes = 0_u64;
+    let mut buffer = vec![0_u8; 512 * 1024];
+    loop {
+        let count = decoder.read(&mut buffer).context("解压读取失败")?;
+        if count == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..count])
+            .context("写入解压输出失败")?;
+        output_bytes = output_bytes.saturating_add(count as u64);
+    }
+
     writer.flush().context("解压结果刷盘失败")?;
 
-    Ok(bytes)
-}
-
-fn decode_to_sink_from_file(path: &Path) -> Result<u64> {
-    let file = File::open(path).with_context(|| format!("无法打开文件: {}", path.display()))?;
-    let reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
-    decode_to_sink(reader)
-}
-
-fn decode_to_sink_from_bytes(data: &[u8]) -> Result<u64> {
-    let cursor = Cursor::new(data);
-    decode_to_sink(cursor)
-}
-
-fn decode_to_sink<R: Read>(source: R) -> Result<u64> {
-    let mut decoder = zstd::Decoder::new(source).context("创建 zstd 解码器失败")?;
-    let bytes = io::copy(&mut decoder, &mut io::sink()).context("解码到 sink 失败")?;
-    Ok(bytes)
-}
-
-fn extract_archive_from_file(path: &Path) -> Result<u64> {
-    let file = File::open(path).with_context(|| format!("无法打开文件: {}", path.display()))?;
-    let reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
-    extract_archive(reader)
-}
-
-fn extract_archive_from_bytes(data: &[u8]) -> Result<u64> {
-    let cursor = Cursor::new(data);
-    extract_archive(cursor)
-}
-
-fn extract_archive<R: Read>(source: R) -> Result<u64> {
-    let tempdir = tempfile::tempdir().context("创建临时目录失败")?;
-    let decoder = zstd::Decoder::new(source).context("创建 zstd 解码器失败")?;
-    let mut archive = tar::Archive::new(decoder);
-
-    archive
-        .unpack(tempdir.path())
-        .context("解包归档失败，可能并非 tar.zst")?;
-
-    count_source_bytes(tempdir.path())
+    Ok(output_bytes)
 }
 
 fn detect_archive_kind(path: &Path) -> Result<ArchiveKind> {
@@ -600,25 +879,6 @@ fn ratio(output_bytes: u64, source_bytes: u64) -> f64 {
     output_bytes as f64 / source_bytes as f64 * 100.0
 }
 
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().to_string()
-}
-
-fn sorted_clone(values: &[f64]) -> Vec<f64> {
-    let mut cloned = values.to_vec();
-    cloned.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    cloned
-}
-
-fn percentile_sorted(sorted: &[f64], percentile: f64) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-
-    let rank = ((sorted.len() as f64 - 1.0) * percentile.clamp(0.0, 1.0)).round() as usize;
-    sorted[rank]
-}
-
 fn mean(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -626,21 +886,8 @@ fn mean(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len() as f64
 }
 
-fn stddev(values: &[f64], mean: f64) -> f64 {
-    if values.len() < 2 {
-        return 0.0;
-    }
-
-    let variance = values
-        .iter()
-        .map(|v| {
-            let delta = *v - mean;
-            delta * delta
-        })
-        .sum::<f64>()
-        / values.len() as f64;
-
-    variance.sqrt()
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -650,7 +897,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             compress_archive,
             decompress_archive,
-            benchmark_decompression
+            benchmark_compression
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -662,37 +909,28 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn benchmark_decode_only_returns_expected_shape() {
+    fn benchmark_compression_returns_recommendation() {
         let temp = tempfile::tempdir().expect("temp dir");
         let source_path = temp.path().join("blob.bin");
-        let archive_path = temp.path().join("blob.bin.zst");
 
         let payload = random_payload(2 * 1024 * 1024);
         let mut source = File::create(&source_path).expect("create source");
         source.write_all(payload.as_bytes()).expect("write payload");
         source.flush().expect("flush source");
 
-        let input = File::open(&source_path).expect("open source");
-        let output = File::create(&archive_path).expect("create archive");
-        let mut encoder = zstd::Encoder::new(output, 6).expect("encoder");
-        io::copy(&mut BufReader::new(input), &mut encoder).expect("compress");
-        encoder.finish().expect("finish");
-
-        let report = benchmark_decompression_sync(BenchmarkRequest {
-            archive_path: path_to_string(&archive_path),
-            iterations: Some(5),
-            warmup: Some(1),
-            mode: Some("decodeOnly".to_string()),
-            in_memory: Some(true),
+        let report = benchmark_compression_sync(BenchmarkRequest {
+            source_path: path_to_string(&source_path),
+            min_level: Some(1),
+            max_level: Some(4),
+            iterations: Some(1),
+            sample_size_mib: Some(16),
+            threads: Some(1),
         })
         .expect("benchmark");
 
-        assert_eq!(report.iterations, 5);
-        assert_eq!(report.warmup, 1);
-        assert_eq!(report.sample_ms.len(), 5);
-        assert_eq!(report.throughput_mi_bs_samples.len(), 5);
-        assert!(report.decompressed_bytes > 0);
-        assert!(report.mean_ms >= 0.0);
+        assert_eq!(report.results.len(), 4);
+        assert!((1..=4).contains(&report.recommended_level));
+        assert!(report.sample_bytes > 0);
     }
 
     fn random_payload(size: usize) -> String {

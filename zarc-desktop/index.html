@@ -14,7 +14,7 @@
       <header class="hero fade-up">
         <p class="eyebrow">Rust + Tauri • Cross Platform</p>
         <h1>ZARC Studio</h1>
-        <p class="subtitle">高性能压缩解压与精准解压性能测试</p>
+        <p class="subtitle">高性能压缩解压、实时进度与快速压缩等级推荐</p>
       </header>
 
       <main class="grid">
@@ -46,6 +46,16 @@
           </label>
 
           <button id="compressSubmit" class="primary" type="button">开始压缩</button>
+
+          <div class="progress-panel">
+            <div class="progress-meta">
+              <span id="compressProgressText">等待任务开始</span>
+              <span id="compressProgressPercent">0%</span>
+            </div>
+            <div class="progress-track"><div id="compressProgressBar" class="progress-fill"></div></div>
+            <small id="compressProgressStats">-</small>
+          </div>
+
           <pre id="compressResult" class="result"></pre>
         </section>
 
@@ -66,45 +76,55 @@
           </div>
 
           <button id="decompressSubmit" class="primary" type="button">开始解压</button>
+
+          <div class="progress-panel">
+            <div class="progress-meta">
+              <span id="decompressProgressText">等待任务开始</span>
+              <span id="decompressProgressPercent">0%</span>
+            </div>
+            <div class="progress-track"><div id="decompressProgressBar" class="progress-fill"></div></div>
+            <small id="decompressProgressStats">-</small>
+          </div>
+
           <pre id="decompressResult" class="result"></pre>
         </section>
 
         <section class="card benchmark fade-up" style="--delay: 200ms">
-          <h2>解压性能测试</h2>
-          <p class="hint">提供预热、多轮采样与吞吐统计，适合压缩算法调优。</p>
+          <h2>快速压缩性能测试</h2>
+          <p class="hint">快速比较多个压缩等级，自动给出平衡吞吐与压缩率的推荐等级。</p>
 
-          <label for="benchmarkSource">归档文件</label>
-          <div class="row">
-            <input id="benchmarkSource" readonly placeholder="请选择待测试归档" />
-            <button id="pickBenchmarkSource" class="ghost" type="button">选择文件</button>
+          <div class="inline-actions">
+            <button id="pickBenchmarkFile" type="button">选择文件</button>
+            <button id="pickBenchmarkDirectory" type="button">选择目录</button>
+            <span id="benchmarkKindTag" class="tag">当前: 文件</span>
+          </div>
+
+          <label for="benchmarkSource">测试源路径</label>
+          <input id="benchmarkSource" readonly placeholder="请选择用于快速测试的源文件/目录" />
+
+          <div class="two-col">
+            <div>
+              <label for="benchmarkMinLevel">最小等级</label>
+              <input id="benchmarkMinLevel" type="number" min="1" max="22" value="1" />
+            </div>
+            <div>
+              <label for="benchmarkMaxLevel">最大等级</label>
+              <input id="benchmarkMaxLevel" type="number" min="1" max="22" value="12" />
+            </div>
           </div>
 
           <div class="two-col">
             <div>
-              <label for="benchmarkIterations">采样轮数</label>
-              <input id="benchmarkIterations" type="number" min="3" max="200" value="12" />
+              <label for="benchmarkIterations">每等级轮数</label>
+              <input id="benchmarkIterations" type="number" min="1" max="12" value="2" />
             </div>
             <div>
-              <label for="benchmarkWarmup">预热轮数</label>
-              <input id="benchmarkWarmup" type="number" min="0" max="100" value="3" />
+              <label for="benchmarkSampleSize">样本大小 (MiB)</label>
+              <input id="benchmarkSampleSize" type="number" min="4" max="1024" value="64" />
             </div>
           </div>
 
-          <div class="two-col">
-            <div>
-              <label for="benchmarkMode">模式</label>
-              <select id="benchmarkMode">
-                <option value="decodeOnly">纯解码 (推荐)</option>
-                <option value="extractArchive">解码 + 解包</option>
-              </select>
-            </div>
-            <label class="checkbox">
-              <input id="benchmarkInMemory" type="checkbox" checked />
-              <span>将压缩数据加载到内存以减小磁盘抖动</span>
-            </label>
-          </div>
-
-          <button id="benchmarkSubmit" class="primary" type="button">开始性能测试</button>
+          <button id="benchmarkSubmit" class="primary" type="button">开始快速测试</button>
 
           <div id="benchmarkSummary" class="summary"></div>
           <div id="benchmarkBars" class="bars"></div>

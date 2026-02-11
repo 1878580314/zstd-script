@@ -1,14 +1,12 @@
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Noto+Sans+SC:wght@400;500;700&display=swap');
 
 :root {
-  --bg: #f6f9fc;
   --surface: #ffffff;
   --surface-soft: #f0f6fb;
   --text: #1f2a37;
   --muted: #5f6e7f;
   --border: #d7e4ef;
   --accent: #0d9488;
-  --accent-soft: #dff7f4;
   --accent-strong: #0f766e;
   --warning: #b45309;
   --shadow: 0 20px 40px rgba(13, 60, 88, 0.08);
@@ -75,7 +73,7 @@ body {
   font-size: 0.86rem;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: #0f766e;
+  color: var(--accent-strong);
 }
 
 h1 {
@@ -170,7 +168,7 @@ select:focus {
 
 .tag {
   border: 1px solid #b8d6d1;
-  background: var(--accent-soft);
+  background: #e5faf6;
   color: var(--accent-strong);
   border-radius: 999px;
   padding: 4px 10px;
@@ -231,6 +229,43 @@ button.ghost {
   font-weight: 600;
 }
 
+.progress-panel {
+  margin-top: 12px;
+  border: 1px solid #d9e7f2;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 10px;
+}
+
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.9rem;
+  color: #2b526f;
+}
+
+.progress-track {
+  margin-top: 7px;
+  height: 10px;
+  border-radius: 999px;
+  background: #ddeaf5;
+  overflow: hidden;
+}
+
+.progress-fill {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, #7ad2c5, #0f8f84);
+  transition: width 0.12s linear;
+}
+
+.progress-panel small {
+  display: block;
+  margin-top: 7px;
+  color: #507189;
+}
+
 .result {
   margin-top: 10px;
   border-radius: 12px;
@@ -282,14 +317,41 @@ button.ghost {
   padding: 10px;
   min-height: 108px;
   display: grid;
-  align-content: end;
-  gap: 5px;
+  gap: 6px;
 }
 
-.bar {
+.bench-row {
+  display: grid;
+  grid-template-columns: 44px 1fr 170px;
+  gap: 8px;
+  align-items: center;
+}
+
+.bench-label {
+  color: #3d6078;
+  font-weight: 700;
+}
+
+.bench-track {
   height: 10px;
-  border-radius: 8px;
-  background: linear-gradient(90deg, #7dd3c7, #1f9a8e);
+  border-radius: 999px;
+  background: #e0edf8;
+  overflow: hidden;
+}
+
+.bench-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #9ac8ff, #3b82f6);
+}
+
+.bench-fill.recommended {
+  background: linear-gradient(90deg, #86e6d8, #0ea5a4);
+}
+
+.bench-value {
+  color: #315974;
+  text-align: right;
 }
 
 .status-wrap {
@@ -368,5 +430,15 @@ button.ghost {
 
   .summary-grid {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .bench-row {
+    grid-template-columns: 44px 1fr;
+  }
+
+  .bench-value {
+    grid-column: 1 / -1;
+    text-align: left;
+    padding-left: 52px;
   }
 }

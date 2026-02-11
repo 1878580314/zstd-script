@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import './style.css';
+
+type ProgressKind = 'compress' | 'decompress';
 
 interface OperationReport {
   operation: string;
@@ -13,25 +16,35 @@ interface OperationReport {
   compressionRatio: number | null;
 }
 
-interface BenchmarkReport {
-  archivePath: string;
-  mode: string;
-  inMemory: boolean;
-  warmup: number;
-  iterations: number;
-  compressedBytes: number;
-  decompressedBytes: number;
-  sampleMs: number[];
-  throughputMiBsSamples: number[];
+interface ProgressPayload {
+  operation: ProgressKind;
+  processedBytes: number;
+  totalBytes: number;
+  percent: number;
+  throughputMiBs: number;
+  etaSeconds: number | null;
+  done: boolean;
+  error: string | null;
+}
+
+interface CompressionLevelReport {
+  level: number;
   meanMs: number;
-  medianMs: number;
-  p95Ms: number;
-  minMs: number;
-  maxMs: number;
-  stddevMs: number;
   meanThroughputMiBs: number;
-  bestThroughputMiBs: number;
-  worstThroughputMiBs: number;
+  compressedBytes: number;
+  ratioPercent: number;
+  score: number;
+}
+
+interface CompressionBenchmarkReport {
+  sourcePath: string;
+  sampleBytes: number;
+  minLevel: number;
+  maxLevel: number;
+  iterations: number;
+  threads: number;
+  recommendedLevel: number;
+  results: CompressionLevelReport[];
   note: string;
 }
 
@@ -48,15 +61,32 @@ const decompressOutput = byId<HTMLInputElement>('decompressOutput');
 const decompressResult = byId<HTMLElement>('decompressResult');
 
 const benchmarkSource = byId<HTMLInputElement>('benchmarkSource');
+const benchmarkKindTag = byId<HTMLSpanElement>('benchmarkKindTag');
+const benchmarkMinLevel = byId<HTMLInputElement>('benchmarkMinLevel');
+const benchmarkMaxLevel = byId<HTMLInputElement>('benchmarkMaxLevel');
 const benchmarkIterations = byId<HTMLInputElement>('benchmarkIterations');
-const benchmarkWarmup = byId<HTMLInputElement>('benchmarkWarmup');
-const benchmarkInMemory = byId<HTMLInputElement>('benchmarkInMemory');
-const benchmarkMode = byId<HTMLSelectElement>('benchmarkMode');
+const benchmarkSampleSize = byId<HTMLInputElement>('benchmarkSampleSize');
 const benchmarkSummary = byId<HTMLElement>('benchmarkSummary');
 const benchmarkBars = byId<HTMLElement>('benchmarkBars');
 
-const statusEl = byId<HTMLElement>('status');
+const compressProgressBar = byId<HTMLElement>('compressProgressBar');
+const compressProgressPercent = byId<HTMLElement>('compressProgressPercent');
+const compressProgressText = byId<HTMLElement>('compressProgressText');
+const compressProgressStats = byId<HTMLElement>('compressProgressStats');
 
+const decompressProgressBar = byId<HTMLElement>('decompressProgressBar');
+const decompressProgressPercent = byId<HTMLElement>('decompressProgressPercent');
+const decompressProgressText = byId<HTMLElement>('decompressProgressText');
+const decompressProgressStats = byId<HTMLElement>('decompressProgressStats');
+
+const statusEl = byId<HTMLElement>('status');
+const actionButtons = [
+  byId<HTMLButtonElement>('compressSubmit'),
+  byId<HTMLButtonElement>('decompressSubmit'),
+  byId<HTMLButtonElement>('benchmarkSubmit')
+];
+
+void initProgressEvents();
 wireEvents();
 
 function wireEvents() {
@@ -66,11 +96,7 @@ function wireEvents() {
 
   byId<HTMLButtonElement>('pickCompressFile').addEventListener('click', async () => {
     compressKindTag.textContent = '当前: 文件';
-    const selected = await open({
-      title: '选择待压缩文件',
-      multiple: false,
-      directory: false
-    });
+    const selected = await open({ title: '选择待压缩文件', multiple: false, directory: false });
     if (typeof selected === 'string') {
       compressSource.value = selected;
     }
@@ -78,11 +104,7 @@ function wireEvents() {
 
   byId<HTMLButtonElement>('pickCompressDirectory').addEventListener('click', async () => {
     compressKindTag.textContent = '当前: 目录';
-    const selected = await open({
-      title: '选择待压缩目录',
-      multiple: false,
-      directory: true
-    });
+    const selected = await open({ title: '选择待压缩目录', multiple: false, directory: true });
     if (typeof selected === 'string') {
       compressSource.value = selected;
     }
@@ -104,21 +126,20 @@ function wireEvents() {
       return;
     }
 
-    try {
-      setBusy('正在压缩，请稍候...');
+    resetProgress('compress', '准备压缩...');
+
+    await runTask('正在压缩，请稍候...', async () => {
       const report = await invoke<OperationReport>('compress_archive', {
         request: {
           sourcePath: compressSource.value,
           outputPath: emptyToNull(compressOutput.value),
-          level: toNumber(compressLevel.value, 8),
+          level: toInt(compressLevel.value, 8),
           includeRootDir: includeRootDir.checked
         }
       });
       compressResult.textContent = formatOperation(report);
       setStatus(`压缩完成: ${report.outputPath}`, 'success');
-    } catch (error) {
-      setStatus(normalizeError(error), 'error');
-    }
+    });
   });
 
   byId<HTMLButtonElement>('pickDecompressSource').addEventListener('click', async () => {
@@ -134,11 +155,7 @@ function wireEvents() {
   });
 
   byId<HTMLButtonElement>('pickDecompressOutput').addEventListener('click', async () => {
-    const selected = await open({
-      title: '选择解压输出目录',
-      multiple: false,
-      directory: true
-    });
+    const selected = await open({ title: '选择解压输出目录', multiple: false, directory: true });
     if (typeof selected === 'string') {
       decompressOutput.value = selected;
     }
@@ -150,8 +167,9 @@ function wireEvents() {
       return;
     }
 
-    try {
-      setBusy('正在解压，请稍候...');
+    resetProgress('decompress', '准备解压...');
+
+    await runTask('正在解压，请稍候...', async () => {
       const report = await invoke<OperationReport>('decompress_archive', {
         request: {
           archivePath: decompressSource.value,
@@ -160,18 +178,20 @@ function wireEvents() {
       });
       decompressResult.textContent = formatOperation(report);
       setStatus(`解压完成: ${report.outputPath}`, 'success');
-    } catch (error) {
-      setStatus(normalizeError(error), 'error');
+    });
+  });
+
+  byId<HTMLButtonElement>('pickBenchmarkFile').addEventListener('click', async () => {
+    benchmarkKindTag.textContent = '当前: 文件';
+    const selected = await open({ title: '选择快速测试文件', multiple: false, directory: false });
+    if (typeof selected === 'string') {
+      benchmarkSource.value = selected;
     }
   });
 
-  byId<HTMLButtonElement>('pickBenchmarkSource').addEventListener('click', async () => {
-    const selected = await open({
-      title: '选择用于性能测试的归档',
-      multiple: false,
-      directory: false,
-      filters: [{ name: 'Zstd Archive', extensions: ['zst'] }]
-    });
+  byId<HTMLButtonElement>('pickBenchmarkDirectory').addEventListener('click', async () => {
+    benchmarkKindTag.textContent = '当前: 目录';
+    const selected = await open({ title: '选择快速测试目录', multiple: false, directory: true });
     if (typeof selected === 'string') {
       benchmarkSource.value = selected;
     }
@@ -179,67 +199,149 @@ function wireEvents() {
 
   byId<HTMLButtonElement>('benchmarkSubmit').addEventListener('click', async () => {
     if (!benchmarkSource.value) {
-      setStatus('请先选择基准测试文件。', 'error');
+      setStatus('请先选择快速测试源路径。', 'error');
       return;
     }
 
-    try {
-      setBusy('正在执行解压性能测试...');
-      const report = await invoke<BenchmarkReport>('benchmark_decompression', {
+    await runTask('正在快速评估压缩等级...', async () => {
+      const report = await invoke<CompressionBenchmarkReport>('benchmark_compression', {
         request: {
-          archivePath: benchmarkSource.value,
-          warmup: toNumber(benchmarkWarmup.value, 3),
-          iterations: toNumber(benchmarkIterations.value, 12),
-          mode: benchmarkMode.value,
-          inMemory: benchmarkInMemory.checked
+          sourcePath: benchmarkSource.value,
+          minLevel: toInt(benchmarkMinLevel.value, 1),
+          maxLevel: toInt(benchmarkMaxLevel.value, 12),
+          iterations: toInt(benchmarkIterations.value, 2),
+          sampleSizeMiB: toInt(benchmarkSampleSize.value, 64)
         }
       });
       renderBenchmark(report);
-      setStatus('性能测试完成。', 'success');
-    } catch (error) {
-      setStatus(normalizeError(error), 'error');
+      setStatus(`测试完成，推荐压缩等级 L${report.recommendedLevel}。`, 'success');
+    });
+  });
+}
+
+async function initProgressEvents() {
+  await listen<ProgressPayload>('zarc://progress', (event) => {
+    const payload = event.payload;
+    updateProgress(payload.operation, payload);
+
+    if (payload.done && payload.error) {
+      setStatus(payload.error, 'error');
     }
   });
 }
 
-function renderBenchmark(report: BenchmarkReport) {
+function updateProgress(kind: ProgressKind, payload: ProgressPayload) {
+  const refs =
+    kind === 'compress'
+      ? {
+          bar: compressProgressBar,
+          percent: compressProgressPercent,
+          text: compressProgressText,
+          stats: compressProgressStats
+        }
+      : {
+          bar: decompressProgressBar,
+          percent: decompressProgressPercent,
+          text: decompressProgressText,
+          stats: decompressProgressStats
+        };
+
+  refs.bar.style.width = `${Math.max(0, Math.min(payload.percent, 100)).toFixed(2)}%`;
+  refs.percent.textContent = `${payload.percent.toFixed(1)}%`;
+
+  if (payload.done) {
+    refs.text.textContent = payload.error ? '任务失败' : '任务完成';
+  } else {
+    refs.text.textContent = kind === 'compress' ? '压缩进行中' : '解压进行中';
+  }
+
+  const etaText = payload.etaSeconds === null ? '-' : `${formatSeconds(payload.etaSeconds)}`;
+  refs.stats.textContent =
+    `已处理 ${formatBytes(payload.processedBytes)} / ${formatBytes(payload.totalBytes)} • ` +
+    `速度 ${payload.throughputMiBs.toFixed(2)} MiB/s • ETA ${etaText}`;
+}
+
+function resetProgress(kind: ProgressKind, text: string) {
+  updateProgress(kind, {
+    operation: kind,
+    processedBytes: 0,
+    totalBytes: 0,
+    percent: 0,
+    throughputMiBs: 0,
+    etaSeconds: null,
+    done: false,
+    error: null
+  });
+
+  if (kind === 'compress') {
+    compressProgressText.textContent = text;
+    compressProgressStats.textContent = '-';
+  } else {
+    decompressProgressText.textContent = text;
+    decompressProgressStats.textContent = '-';
+  }
+}
+
+function renderBenchmark(report: CompressionBenchmarkReport) {
+  if (report.results.length === 0) {
+    benchmarkSummary.innerHTML = '<p class="hint">未获取到可用结果。</p>';
+    benchmarkBars.innerHTML = '';
+    return;
+  }
+
+  const bestThroughput = Math.max(...report.results.map((r) => r.meanThroughputMiBs));
+  const bestRatio = Math.min(...report.results.map((r) => r.ratioPercent));
+
   benchmarkSummary.innerHTML = `
     <div class="summary-grid">
-      <div class="metric"><small>平均耗时</small><strong>${report.meanMs.toFixed(2)} ms</strong></div>
-      <div class="metric"><small>中位耗时</small><strong>${report.medianMs.toFixed(2)} ms</strong></div>
-      <div class="metric"><small>P95</small><strong>${report.p95Ms.toFixed(2)} ms</strong></div>
-      <div class="metric"><small>平均吞吐</small><strong>${report.meanThroughputMiBs.toFixed(2)} MiB/s</strong></div>
-      <div class="metric"><small>最佳吞吐</small><strong>${report.bestThroughputMiBs.toFixed(2)} MiB/s</strong></div>
-      <div class="metric"><small>标准差</small><strong>${report.stddevMs.toFixed(2)} ms</strong></div>
+      <div class="metric"><small>推荐等级</small><strong>L${report.recommendedLevel}</strong></div>
+      <div class="metric"><small>样本大小</small><strong>${formatBytes(report.sampleBytes)}</strong></div>
+      <div class="metric"><small>线程数</small><strong>${report.threads}</strong></div>
+      <div class="metric"><small>最高吞吐</small><strong>${bestThroughput.toFixed(2)} MiB/s</strong></div>
+      <div class="metric"><small>最佳压缩率</small><strong>${bestRatio.toFixed(2)}%</strong></div>
+      <div class="metric"><small>每等级轮数</small><strong>${report.iterations}</strong></div>
     </div>
     <p class="hint" style="margin:10px 0 0;">${report.note}</p>
   `;
 
-  const maxMs = Math.max(...report.sampleMs, 1);
+  const maxScore = Math.max(...report.results.map((r) => r.score), 1e-6);
   benchmarkBars.innerHTML = '';
 
-  report.sampleMs.forEach((ms, index) => {
-    const row = document.createElement('div');
-    row.style.display = 'grid';
-    row.style.gridTemplateColumns = '70px 1fr 68px';
-    row.style.alignItems = 'center';
-    row.style.gap = '8px';
+  for (const row of report.results) {
+    const wrap = document.createElement('div');
+    wrap.className = 'bench-row';
 
     const label = document.createElement('small');
-    label.textContent = `#${index + 1}`;
-    label.style.color = '#5f6e7f';
+    label.textContent = `L${row.level}`;
+    label.className = 'bench-label';
 
-    const bar = document.createElement('div');
-    bar.className = 'bar';
-    bar.style.width = `${Math.max((ms / maxMs) * 100, 4)}%`;
+    const meter = document.createElement('div');
+    meter.className = 'bench-track';
 
-    const value = document.createElement('small');
-    value.textContent = `${ms.toFixed(2)} ms`;
-    value.style.color = '#315974';
+    const fill = document.createElement('div');
+    fill.className = `bench-fill${row.level === report.recommendedLevel ? ' recommended' : ''}`;
+    fill.style.width = `${Math.max((row.score / maxScore) * 100, 6)}%`;
+    meter.append(fill);
 
-    row.append(label, bar, value);
-    benchmarkBars.append(row);
-  });
+    const info = document.createElement('small');
+    info.className = 'bench-value';
+    info.textContent = `${row.meanThroughputMiBs.toFixed(1)} MiB/s • ${row.ratioPercent.toFixed(2)}%`;
+
+    wrap.append(label, meter, info);
+    benchmarkBars.append(wrap);
+  }
+}
+
+async function runTask(statusText: string, task: () => Promise<void>) {
+  setBusy(statusText);
+  setActionsDisabled(true);
+  try {
+    await task();
+  } catch (error) {
+    setStatus(normalizeError(error), 'error');
+  } finally {
+    setActionsDisabled(false);
+  }
 }
 
 function formatOperation(report: OperationReport): string {
@@ -254,6 +356,12 @@ function formatOperation(report: OperationReport): string {
     `耗时: ${report.durationMs.toFixed(2)} ms`,
     `吞吐: ${report.throughputMiBs.toFixed(2)} MiB/s`
   ].join('\n');
+}
+
+function setActionsDisabled(disabled: boolean) {
+  for (const button of actionButtons) {
+    button.disabled = disabled;
+  }
 }
 
 function setBusy(message: string) {
@@ -284,8 +392,8 @@ function byId<T extends HTMLElement>(id: string): T {
   return element as T;
 }
 
-function toNumber(value: string, fallback: number): number {
-  const parsed = Number(value);
+function toInt(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) {
     return fallback;
   }
@@ -310,4 +418,16 @@ function formatBytes(bytes: number): string {
   } while (value >= 1024 && unitIndex < units.length - 1);
 
   return `${value.toFixed(2)} ${units[unitIndex]}`;
+}
+
+function formatSeconds(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return '-';
+  }
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  }
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins}m ${secs.toFixed(0)}s`;
 }
