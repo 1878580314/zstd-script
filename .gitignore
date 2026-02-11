@@ -27,3 +27,9 @@ env/
 .idea/
 .vscode/
 *.spec
+
+# Desktop app build artifacts
+zarc-desktop/node_modules/
+zarc-desktop/dist/
+zarc-desktop/src-tauri/target/
+zarc-desktop/src-tauri/gen/

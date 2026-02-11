@@ -1,89 +1,121 @@
-# Zstandard Intelligent Toolbox · Zstandard 智能工具箱
+# ZARC Studio (Rust + Tauri)
 
-## Overview / 项目简介
-Zstandard Intelligent Toolbox is an interactive CLI that wraps Facebook's Zstandard codec with rich terminal feedback, optional AES-256-GCM encryption, and streaming-friendly workflows. It targets power users who need fast compression for single files or entire folders without sacrificing usability.
+现代化、高性能、轻量化的桌面归档工具，核心能力已迁移到 Rust 技术栈：
 
-Zstandard 智能工具箱是一款交互式命令行工具，基于 Facebook 的 Zstandard 编解码器，配合 Rich 终端组件提供可视化提示，同时支持可选的 AES-256-GCM 加密与流式处理，帮助你在追求性能的同时保持易用体验。
+- 流式 `zstd` 压缩与解压
+- 可选流式 `AES-256-GCM` 加密（`ZARCv2` 格式）
+- 归档完整性校验（无需落盘提取）
+- 解压缩性能测试（预热 + 多轮统计 + 吞吐结果）
+- 精致现代化桌面 UI（Tauri + React）
 
-## Highlights / 功能特性
-- **Compression & archiving**: Compress individual files or whole directories; folders are transparently tarred and compressed into `.tar.zst` outputs.
-- **Streaming AES-256-GCM**: Encryption/decryption now works in constant memory, so archives no longer need to fit in RAM and can exceed 64 GB limits.
-- **Rich UX**: Progress bars, summaries, and prompts are rendered via `rich` for a polished workflow.
-- **Integrity tests**: Validate `.zst` archives without extracting data; encrypted archives can be verified after decryption.
-- **Cross-platform ready**: Works on macOS/Linux/Windows; GitHub Actions builds Windows and Linux distributables automatically.
--
-- **智能压缩与归档**：支持文件与目录，目录会自动打包为 `.tar.zst`，无需中间文件。
-- **流式 AES-256-GCM**：加/解密全过程皆为流式处理，不占用额外内存，也不再受 64 GB 单次限制影响。
-- **丰富的终端体验**：借助 `rich` 展示进度条、摘要与提示，交互体验更友好。
-- **完整性校验**：无需解压即可验证 `.zst` 文件；加密包解密后亦可校验。
-- **跨平台准备就绪**：适配 macOS/Linux/Windows，并通过 GitHub Actions 自动构建 Windows 与 Linux 发行包。
+## 项目结构
 
-## Requirements / 环境要求
-- Python 3.10+ (due to the use of modern type hints and structural pattern handling).
-- `zstandard`, `rich`; `cryptography` is optional but required for encryption/decryption features.
-- On Windows, use PowerShell or compatible terminals for Unicode output.
+- `zarc-desktop/src-tauri`: Rust 核心后端（压缩 / 解压 / 校验）
+- `zarc-desktop/src-tauri`: Rust 核心后端（压缩 / 解压 / 校验 / 性能测试）
+- `zarc-desktop/src`: 桌面前端 UI
+- `zstd.py`: 历史 Python 版本（保留作参考）
 
-Python 版本需 3.10 及以上；依赖 `zstandard`、`rich`，如需加解密能力需额外安装 `cryptography`。Windows 用户建议使用支持 Unicode 的 PowerShell 或终端。
+## 功能说明
 
-## Installation / 安装
+1. 压缩模式
+- 支持文件压缩为 `.zst`
+- 支持目录打包压缩为 `.tar.zst`
+- 可选加密输出为 `.enc`
+
+2. 解压模式
+- 自动识别加密头 `ZARCv2`
+- 自动支持 `.zst` / `.tar.zst` / `.enc`
+
+3. 校验模式
+- 流式验证归档可读性
+- 加密归档会校验密码与认证标签
+
+4. 性能测试模式
+- 针对解压缩流程做基准测试（默认 1 轮预热 + 3 轮统计）
+- 输出平均值/中位数/最优吞吐（MB/s）
+- 测试时写入 `sink`，避免落盘写入开销干扰解压缩性能
+
+## 本地运行
+
+Linux（Arch）先安装系统依赖：
+
 ```bash
-python -m pip install --upgrade pip
-pip install zstandard rich  # 加密功能请同时安装 cryptography
-pip install cryptography    # 可选
+sudo pacman -Syu --needed webkit2gtk libsoup gtk3 base-devel pkgconf
 ```
 
-## Usage / 使用指南
-1. Launch the toolbox:
-   ```bash
-   python zstd.py
-   ```
-2. Follow the interactive menu to:
-   - Compress files/folders (optionally encrypting them).
-   - Decompress `.zst`, `.tar.zst`, or `.enc` archives.
-   - Test archive integrity.
-3. Drag & drop paths into the prompt if your terminal supports it.
+前端依赖安装：
 
-使用步骤：
-1. 执行 `python zstd.py` 进入主菜单。
-2. 按提示选择功能：压缩文件/目录、解压 `.zst`/`.tar.zst`/`.enc`、或测试压缩包。
-3. 支持拖拽路径到终端输入框，省去手动输入。
-
-### Encryption Notes / 加密说明
-- When prompted, enable encryption and enter a strong passphrase; confirmation is required to avoid typos.
-- Decryption requests the same password and validates the GCM authentication tag. Errors indicate a wrong password or corrupted data.
-- Streaming encryption removes the previous requirement to buffer full archives, making multi-gigabyte encrypted backups practical.
-
-启用加密时需要输入并确认密码；解密时若认证失败，会提示密码错误或文件损坏。流式实现无需再缓存完整文件，适用于 TB 级数据归档。
-
-## Development / 开发指南
-1. Create and activate a virtual environment.
-2. Install development dependencies:
-   ```bash
-   pip install zstandard rich cryptography
-   ```
-3. Run the toolbox locally using `python zstd.py` and exercise the desired workflow.
-4. Ensure `python -m compileall zstd.py` succeeds before committing.
-
-## Building Binaries / 构建独立可执行文件
-Manual builds rely on [PyInstaller](https://pyinstaller.org/):
 ```bash
-pip install pyinstaller
-pyinstaller --onefile --name zstd zstd.py
+cd zarc-desktop
+npm install
 ```
-Artifacts appear under `dist/` (`zstd` on Linux/macOS, `zstd.exe` on Windows).
 
-通过 PyInstaller 可快速生成独立可执行文件，命令如上。输出位于 `dist/` 目录（Linux/macOS 生成 `zstd`，Windows 生成 `zstd.exe`）。
+开发模式：
 
-## Continuous Delivery / 持续交付
-- The project ships with a GitHub Actions workflow (`.github/workflows/release.yml`).
-- Builds trigger on tag pushes (`v*`) or manual dispatch, producing Windows & Linux binaries.
-- Artifacts are archived (`.zip` on Windows, `.tar.gz` on Linux) and attached to GitHub Releases automatically.
+```bash
+npm run tauri dev
+```
 
-项目提供 GitHub Actions 工作流（`.github/workflows/release.yml`）：
-- 当推送 `v*` 标签或手动触发时，会在 Windows 与 Linux 上构建可执行文件。
-- 构建结果分别打包为 `.zip`（Windows）和 `.tar.gz`（Linux），并自动上传至 GitHub Releases。
+默认打包：
 
-## License / 许可证
-Unless otherwise noted, the project is distributed under the MIT License.
+```bash
+npm run tauri build
+```
 
-除特殊说明外，本项目以 MIT 许可证发布，欢迎自由使用与二次开发。
+## 全平台可执行文件打包（优化版）
+
+本项目已配置为 Tauri 全平台发布流：
+
+- Linux: `.deb` + `.AppImage`
+- Windows: `.msi`
+- macOS: `.dmg`
+
+### 本地按平台打包
+
+```bash
+cd zarc-desktop
+npm run tauri:bundle:linux
+npm run tauri:bundle:windows
+npm run tauri:bundle:macos
+```
+
+产物目录：
+
+- `zarc-desktop/src-tauri/target/release/bundle/deb`
+- `zarc-desktop/src-tauri/target/release/bundle/appimage`
+- `zarc-desktop/src-tauri/target/release/bundle/msi`
+- `zarc-desktop/src-tauri/target/release/bundle/dmg`
+
+### GitHub Actions 自动发布
+
+工作流：`.github/workflows/release.yml`
+
+- 推送标签 `v*`（如 `v2.1.0`）会自动触发三平台构建
+- 自动将产物上传并附加到 GitHub Release
+
+示例：
+
+```bash
+git tag v2.1.1
+git push origin v2.1.1
+```
+
+### Linux AppImage 常见问题（Arch）
+
+若本地打包 `AppImage` 时报错（如 `unknown type [0x13] section '.relr.dyn'`），通常是本机系统库与 linuxdeploy 内置 strip 兼容性问题。
+
+建议：
+
+1. 本地先产出 `.deb`（稳定）
+2. `AppImage` 交给 GitHub Actions 的 Ubuntu Runner 生成
+3. 或在 Ubuntu 容器/虚拟机中打包 `AppImage`
+
+## 说明
+
+- 本仓库当前环境若离线，`cargo`/`npm` 依赖下载会失败；联网后即可正常构建。
+- Rust release 配置已启用 `LTO + strip + codegen-units=1`，兼顾性能与体积。
+- Rust 后端命令：
+  - `compress(source, output, password?, level?)`
+  - `decompress(source, output, password?)`
+  - `verify(source, password?)`
+  - `benchmark_decompress(source, password?, warmup_runs?, measured_runs?)`

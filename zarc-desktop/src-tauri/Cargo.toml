@@ -1,0 +1,33 @@
+[package]
+name = "zarc-desktop"
+version = "2.1.1"
+description = "A high-performance, secure, chunk-based streaming archiver."
+authors = ["Timerain"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1", features = [] }
+
+[dependencies]
+tauri = { version = "1", features = [ "shell-open", "dialog-all", "fs-all"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1.0"
+zstd = "0.13"
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+tar = "0.4"
+walkdir = "2"
+
+[features]
+# default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

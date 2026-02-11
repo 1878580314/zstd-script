@@ -1,0 +1,60 @@
+{
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devPath": "http://localhost:1420",
+    "distDir": "../dist",
+    "withGlobalTauri": true
+  },
+  "package": {
+    "productName": "ZARC Studio",
+    "version": "2.1.1"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "shell": {
+        "all": false,
+        "open": true
+      },
+      "dialog": {
+        "all": true
+      },
+      "fs": {
+        "all": true,
+        "scope": ["**"]
+      }
+    },
+    "windows": [
+      {
+        "title": "ZARC Studio",
+        "width": 960,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 620,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "bundle": {
+      "active": true,
+      "targets": ["deb", "appimage", "msi", "dmg"],
+      "identifier": "com.zarc.studio",
+      "category": "Utility",
+      "shortDescription": "High-performance secure zstd archiver",
+      "longDescription": "ZARC Studio is a modern Rust-powered desktop archiver with streaming zstd compression and optional AES-256-GCM encryption.",
+      "icon": [
+        "icons/32x32.png",
+        "icons/128x128.png",
+        "icons/128x128@2x.png",
+        "icons/icon.ico",
+        "icons/icon.icns"
+      ]
+    }
+  }
+}

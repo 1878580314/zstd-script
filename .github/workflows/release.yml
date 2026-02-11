@@ -1,9 +1,9 @@
-name: Build Releases
+name: Build And Release Desktop
 
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -11,82 +11,93 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.os }}
+    name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            python: '3.11'
-            archive_name: zstd-linux.tar.gz
-            artifact_name: zstd-linux
-            executable: zstd
-          - os: windows-latest
-            python: '3.11'
-            archive_name: zstd-windows.zip
-            artifact_name: zstd-windows
-            executable: zstd.exe
-          - os: macos-latest
-            python: '3.11'
-            archive_name: zstd-macos.tar.gz
-            artifact_name: zstd-macos
-            executable: zstd
+          - platform: linux
+            os: ubuntu-22.04
+            bundles: "deb,appimage"
+            artifact_name: zarc-linux
+            artifact_path: |
+              zarc-desktop/src-tauri/target/release/bundle/deb/*.deb
+              zarc-desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          - platform: windows
+            os: windows-latest
+            bundles: "msi"
+            artifact_name: zarc-windows
+            artifact_path: zarc-desktop/src-tauri/target/release/bundle/msi/*.msi
+          - platform: macos
+            os: macos-latest
+            bundles: "dmg"
+            artifact_name: zarc-macos
+            artifact_path: zarc-desktop/src-tauri/target/release/bundle/dmg/*.dmg
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: ${{ matrix.python }}
+          node-version: 20
+          cache: npm
+          cache-dependency-path: zarc-desktop/package-lock.json
 
-      - name: Install dependencies
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            zarc-desktop/src-tauri -> target
+
+      - name: Install Linux System Dependencies
+        if: matrix.platform == 'linux'
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install zstandard rich cryptography typer pyinstaller
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
 
-      - name: Build executable
-        run: pyinstaller --onefile --name zstd zstd.py
+      - name: Install Frontend Dependencies
+        working-directory: zarc-desktop
+        run: npm ci
 
-      - name: Package artifact (Unix)
-        if: matrix.os != 'windows-latest'
-        shell: bash
-        run: |
-          tar -czf ${{ matrix.archive_name }} -C dist ${{ matrix.executable }}
+      - name: Build Tauri Bundles
+        working-directory: zarc-desktop
+        run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
-      - name: Package artifact (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist\${{ matrix.executable }}" -DestinationPath ${{ matrix.archive_name }}
-
-      - name: Upload artifact
+      - name: Upload Platform Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.archive_name }}
+          path: ${{ matrix.artifact_path }}
           if-no-files-found: error
+          compression-level: 9
 
   publish:
-    name: Publish Release
+    name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - name: Download artifacts
+      - name: Download Build Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: release-artifacts
 
-      - name: List artifacts
-        run: ls -R artifacts
+      - name: Show Artifacts
+        run: ls -R release-artifacts
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/zstd-linux/zstd-linux.tar.gz
-            artifacts/zstd-windows/zstd-windows.zip
-            artifacts/zstd-macos/zstd-macos.tar.gz
           generate_release_notes: true
+          files: release-artifacts/**/*
