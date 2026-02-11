@@ -34,9 +34,11 @@ npm install
 npm run tauri:build:win
 ```
 
-产物默认位于：
+产物默认位于（便携版 EXE）：
 
-- `zarc-desktop/src-tauri/target/release/bundle/msi/`
+- `zarc-desktop/src-tauri/target/release/zarc-desktop.exe`
+
+如需便携分发，可将 EXE 压缩为 zip 后直接分发。
 
 本项目已启用发布优化（`LTO + strip + panic=abort + codegen-units=1`），用于提升性能并减小安装包体积。
 
@@ -44,7 +46,7 @@ npm run tauri:build:win
 
 仓库已配置跨平台自动构建工作流：
 
-- `push main`：自动构建 Linux(`.deb/.AppImage`) + Windows(`.msi`) + macOS(`.dmg`) 并上传为 Actions artifacts
+- `push main`：自动构建 Linux(`.deb/.AppImage`) + Windows(`portable .zip`) + macOS(`.dmg`) 并上传为 Actions artifacts
 - `pull_request -> main`：自动执行同样的三平台构建校验
 - `push tag v*`：构建三平台产物并自动创建 GitHub Release，附带安装包
 - `workflow_dispatch`：可手动触发一次完整构建/发布流程

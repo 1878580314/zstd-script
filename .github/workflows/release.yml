@@ -24,19 +24,19 @@ jobs:
         include:
           - platform: linux
             os: ubuntu-24.04
-            bundles: "deb,appimage"
+            build_command: npm run tauri build -- --bundles deb,appimage
             artifact_name: zarc-linux
             artifact_path: |
               zarc-desktop/src-tauri/target/release/bundle/deb/*.deb
               zarc-desktop/src-tauri/target/release/bundle/appimage/*.AppImage
           - platform: windows
             os: windows-latest
-            bundles: "msi"
-            artifact_name: zarc-windows
-            artifact_path: zarc-desktop/src-tauri/target/release/bundle/msi/*.msi
+            build_command: npm run tauri build -- --no-bundle
+            artifact_name: zarc-windows-portable
+            artifact_path: zarc-desktop/src-tauri/target/release/portable/zarc-windows-portable.zip
           - platform: macos
             os: macos-latest
-            bundles: "dmg"
+            build_command: npm run tauri build -- --bundles dmg
             artifact_name: zarc-macos
             artifact_path: zarc-desktop/src-tauri/target/release/bundle/dmg/*.dmg
 
@@ -79,7 +79,20 @@ jobs:
 
       - name: Build Tauri Bundles
         working-directory: zarc-desktop
-        run: npm run tauri build -- --bundles ${{ matrix.bundles }}
+        run: ${{ matrix.build_command }}
+
+      - name: Pack Windows Portable ZIP
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $exe = "zarc-desktop/src-tauri/target/release/zarc-desktop.exe"
+          if (!(Test-Path $exe)) {
+            throw "Portable EXE not found: $exe"
+          }
+          $outDir = "zarc-desktop/src-tauri/target/release/portable"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          Copy-Item $exe "$outDir/ZARC Studio.exe" -Force
+          Compress-Archive -Path "$outDir/ZARC Studio.exe" -DestinationPath "$outDir/zarc-windows-portable.zip" -Force
 
       - name: Upload Platform Artifact
         uses: actions/upload-artifact@v4

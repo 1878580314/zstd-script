@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev:wsl": "LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 tauri dev",
-    "tauri:build:win": "tauri build --bundles msi"
+    "tauri:build:win": "tauri build --no-bundle"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
