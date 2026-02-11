@@ -14,13 +14,13 @@
       <header class="hero fade-up">
         <p class="eyebrow">Rust + Tauri • Cross Platform</p>
         <h1>ZARC Studio</h1>
-        <p class="subtitle">高性能压缩解压、实时进度与快速压缩等级推荐</p>
+        <p class="subtitle">高性能压缩解压、实时进度、快速等级推荐与加密保护</p>
       </header>
 
       <main class="grid">
         <section class="card fade-up" style="--delay: 80ms">
           <h2>压缩</h2>
-          <p class="hint">支持单文件 `.zst` 与目录 `.tar.zst` 打包压缩。</p>
+          <p class="hint">支持文件/目录压缩，提供可选加密（XChaCha20-Poly1305）。</p>
 
           <div class="inline-actions">
             <button id="pickCompressFile" type="button">选择文件</button>
@@ -45,6 +45,14 @@
             <span>目录压缩时包含根目录</span>
           </label>
 
+          <label class="checkbox">
+            <input id="compressEncrypt" type="checkbox" />
+            <span>启用加密 (输出 `.enc`)</span>
+          </label>
+
+          <label for="compressPassword">加密密码</label>
+          <input id="compressPassword" type="password" placeholder="启用加密后必填" disabled />
+
           <button id="compressSubmit" class="primary" type="button">开始压缩</button>
 
           <div class="progress-panel">
@@ -61,7 +69,7 @@
 
         <section class="card fade-up" style="--delay: 140ms">
           <h2>解压</h2>
-          <p class="hint">自动识别 `.zst` 与 `.tar.zst`，可自定义输出位置。</p>
+          <p class="hint">自动识别 `.zst/.tar.zst` 及 `.enc` 加密版本。</p>
 
           <label for="decompressSource">归档文件</label>
           <div class="row">
@@ -74,6 +82,9 @@
             <input id="decompressOutput" placeholder="留空自动推断" />
             <button id="pickDecompressOutput" class="ghost" type="button">选择位置</button>
           </div>
+
+          <label for="decompressPassword">解密密码 (加密包必填)</label>
+          <input id="decompressPassword" type="password" placeholder="仅加密归档需要输入" />
 
           <button id="decompressSubmit" class="primary" type="button">开始解压</button>
 

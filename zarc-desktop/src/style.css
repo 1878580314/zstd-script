@@ -150,6 +150,11 @@ select:focus {
   box-shadow: 0 0 0 4px rgba(13, 148, 136, 0.14);
 }
 
+input:disabled {
+  background: #f4f7fb;
+  color: #8ca0b4;
+}
+
 .row {
   display: flex;
   gap: 8px;
@@ -187,7 +192,7 @@ select:focus {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 24px;
+  margin-top: 16px;
   font-weight: 500;
   color: var(--muted);
 }

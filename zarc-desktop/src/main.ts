@@ -54,10 +54,13 @@ const compressLevel = byId<HTMLInputElement>('compressLevel');
 const compressLevelLabel = byId<HTMLSpanElement>('compressLevelLabel');
 const compressKindTag = byId<HTMLSpanElement>('compressKindTag');
 const includeRootDir = byId<HTMLInputElement>('includeRootDir');
+const compressEncrypt = byId<HTMLInputElement>('compressEncrypt');
+const compressPassword = byId<HTMLInputElement>('compressPassword');
 const compressResult = byId<HTMLElement>('compressResult');
 
 const decompressSource = byId<HTMLInputElement>('decompressSource');
 const decompressOutput = byId<HTMLInputElement>('decompressOutput');
+const decompressPassword = byId<HTMLInputElement>('decompressPassword');
 const decompressResult = byId<HTMLElement>('decompressResult');
 
 const benchmarkSource = byId<HTMLInputElement>('benchmarkSource');
@@ -94,6 +97,13 @@ function wireEvents() {
     compressLevelLabel.textContent = compressLevel.value;
   });
 
+  compressEncrypt.addEventListener('change', () => {
+    compressPassword.disabled = !compressEncrypt.checked;
+    if (!compressEncrypt.checked) {
+      compressPassword.value = '';
+    }
+  });
+
   byId<HTMLButtonElement>('pickCompressFile').addEventListener('click', async () => {
     compressKindTag.textContent = '当前: 文件';
     const selected = await open({ title: '选择待压缩文件', multiple: false, directory: false });
@@ -113,7 +123,7 @@ function wireEvents() {
   byId<HTMLButtonElement>('pickCompressOutput').addEventListener('click', async () => {
     const selected = await save({
       title: '压缩输出路径',
-      filters: [{ name: 'Zstd Archive', extensions: ['zst'] }]
+      filters: [{ name: 'Archive', extensions: ['zst', 'enc'] }]
     });
     if (typeof selected === 'string') {
       compressOutput.value = selected;
@@ -126,6 +136,12 @@ function wireEvents() {
       return;
     }
 
+    const password = compressEncrypt.checked ? emptyToNull(compressPassword.value) : null;
+    if (compressEncrypt.checked && !password) {
+      setStatus('启用加密时必须输入密码。', 'error');
+      return;
+    }
+
     resetProgress('compress', '准备压缩...');
 
     await runTask('正在压缩，请稍候...', async () => {
@@ -134,7 +150,8 @@ function wireEvents() {
           sourcePath: compressSource.value,
           outputPath: emptyToNull(compressOutput.value),
           level: toInt(compressLevel.value, 8),
-          includeRootDir: includeRootDir.checked
+          includeRootDir: includeRootDir.checked,
+          password
         }
       });
       compressResult.textContent = formatOperation(report);
@@ -147,7 +164,7 @@ function wireEvents() {
       title: '选择归档文件',
       multiple: false,
       directory: false,
-      filters: [{ name: 'Zstd Archive', extensions: ['zst'] }]
+      filters: [{ name: 'Archive', extensions: ['zst', 'enc'] }]
     });
     if (typeof selected === 'string') {
       decompressSource.value = selected;
@@ -173,7 +190,8 @@ function wireEvents() {
       const report = await invoke<OperationReport>('decompress_archive', {
         request: {
           archivePath: decompressSource.value,
-          outputPath: emptyToNull(decompressOutput.value)
+          outputPath: emptyToNull(decompressOutput.value),
+          password: emptyToNull(decompressPassword.value)
         }
       });
       decompressResult.textContent = formatOperation(report);
